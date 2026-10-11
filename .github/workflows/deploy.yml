@@ -56,6 +56,12 @@ jobs:
             echo "→ Construyendo servicio (Rust release)..."
             docker compose build socket-core
 
+            echo "→ Liberando nombre/puerto si el socket-core viejo (monitoring) sigue ocupándolo..."
+            if docker ps -a --format '{{.Names}}' | grep -qx socket-core; then
+              echo "⚠️ Existe un contenedor previo llamado socket-core (stack monitoring). Se elimina para migrar al definitivo."
+              docker rm -f socket-core || true
+            fi
+
             echo "→ Levantando contenedor..."
             docker compose up -d --remove-orphans
 
