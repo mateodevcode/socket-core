@@ -1,0 +1,73 @@
+# .github/workflows/deploy.yml
+name: Deploy Socket-Core
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: SSH Deploy to VPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 20m
+          script: |
+            set -e
+
+            echo "🚀 Iniciando despliegue de socket-core (definitivo)..."
+
+            # 1. Ir al directorio de trabajo en el VPS
+            cd /srv/infra/socket-core
+
+            echo "→ Respaldando .env y base de keys (no versionados)..."
+            cp .env /tmp/socket-core.env.bak 2>/dev/null || true
+            mkdir -p /tmp/socket-core-data.bak
+            cp -r data/. /tmp/socket-core-data.bak/ 2>/dev/null || true
+
+            echo "→ Descartando cambios locales no versionados..."
+            git reset --hard HEAD
+            git clean -fd
+
+            echo "→ Restaurando .env y base de keys..."
+            cp /tmp/socket-core.env.bak .env 2>/dev/null || true
+            mkdir -p data
+            cp -r /tmp/socket-core-data.bak/. data/ 2>/dev/null || true
+            rm -f /tmp/socket-core.env.bak
+            rm -rf /tmp/socket-core-data.bak
+
+            echo "→ Actualizando código desde GitHub..."
+            git fetch origin main
+            git reset --hard origin/main
+
+            echo "→ Verificando que exista el .env (se agrega manual una sola vez)..."
+            if [ ! -f .env ]; then
+              echo "❌ Falta el archivo .env en /srv/infra/socket-core/"
+              echo "   Copia el contenido de tu .env.production local como .env y re-ejecuta el deploy."
+              exit 1
+            fi
+
+            echo "→ Construyendo servicio (Rust release)..."
+            docker compose build socket-core
+
+            echo "→ Levantando contenedor..."
+            docker compose up -d --remove-orphans
+
+            echo "→ Limpiando imágenes viejas para ahorrar espacio en VPS..."
+            docker image prune -f
+
+            echo "→ Verificando salud del servicio..."
+            sleep 5
+            docker compose ps | grep "Up" || (echo "❌ Error: el contenedor no está corriendo" && exit 1)
+            curl -f http://127.0.0.1:3005/health || (echo "❌ Error: /health no responde" && exit 1)
+
+            echo "→ Estado final:"
+            docker compose ps
+
+            echo "✅ ¡Despliegue de socket-core completado!"

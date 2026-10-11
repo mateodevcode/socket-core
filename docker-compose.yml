@@ -1,0 +1,30 @@
+services:
+  socket-core:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: socket-core
+    restart: unless-stopped
+    ports:
+      # Solo loopback; el acceso externo entra por Nginx con TLS.
+      - "127.0.0.1:3005:3005"
+    env_file:
+      - .env
+    environment:
+      - RUST_LOG=info
+      - HOST=0.0.0.0
+      - PORT=3005
+      - DATABASE_URL=sqlite:/app/data/socket-core.db?mode=rwc
+    volumes:
+      - ./data:/app/data
+    networks:
+      - central_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:3005/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  central_network:
+    external: true

@@ -1,0 +1,6 @@
+/target
+/data/*.db
+/data/*.db-*
+.env
+.env.production
+.env*.local
