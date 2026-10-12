@@ -149,8 +149,10 @@ def main() -> int:
                     server_hostname=host,
                 ) as s:
                     cert = s.getpeercert()
-                exp = datetime.datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
-                dias = (exp - datetime.datetime.utcnow()).days
+                exp = datetime.datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z").replace(
+                    tzinfo=datetime.timezone.utc
+                )
+                dias = (exp - datetime.datetime.now(datetime.timezone.utc)).days
                 if dias > 15:
                     pintar(True, f"cert {host}", f"vence en {dias} días")
                 else:
