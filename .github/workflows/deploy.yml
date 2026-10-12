@@ -108,8 +108,17 @@ jobs:
             sudo nginx -t
             sudo systemctl reload nginx
 
-            echo "→ Chequeo público final..."
-            curl -f https://ws.seventwo.tech/health || (echo "❌ Error: https://ws.seventwo.tech/health no responde" && exit 1)
+            echo "→ Chequeo público final (con reintentos por si el DNS aún propaga)..."
+            OK=0
+            for i in 1 2 3 4 5 6; do
+              if curl -f --max-time 10 https://ws.seventwo.tech/health; then
+                OK=1
+                break
+              fi
+              echo "→ intento $i falló, reintentando en 10s..."
+              sleep 10
+            done
+            [ "$OK" = "1" ] || (echo "❌ Error: https://ws.seventwo.tech/health no responde" && exit 1)
 
             echo "→ Estado final:"
             docker compose ps
