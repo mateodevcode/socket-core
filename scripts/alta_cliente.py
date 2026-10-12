@@ -20,6 +20,17 @@ import urllib.request
 import urllib.error
 
 
+def resolver_env(ruta: str) -> str:
+    """Busca el .env en la ruta dada, subiendo carpetas y en la ruta estándar del VPS."""
+    if os.path.isfile(ruta):
+        return ruta
+    if ruta == ".env":
+        for c in ("../.env", "/srv/infra/socket-core/.env"):
+            if os.path.isfile(c):
+                return c
+    return ruta
+
+
 def leer_master_key(env_path: str) -> str:
     try:
         with open(env_path, encoding="utf-8") as f:
@@ -59,9 +70,10 @@ def main() -> None:
     ap.add_argument("--env", default=".env")
     args = ap.parse_args()
 
-    master = leer_master_key(args.env)
+    env_path = resolver_env(args.env)
+    master = leer_master_key(env_path)
     if not master:
-        print(f"[ERROR] No encontré MASTER_KEY en {args.env}. Corre desde /srv/infra/socket-core.")
+        print(f"[ERROR] No encontre MASTER_KEY en {env_path}. Corre desde /srv/infra/socket-core.")
         sys.exit(1)
 
     print("== Alta de proyecto cliente ===")
