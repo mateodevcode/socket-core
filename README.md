@@ -267,7 +267,94 @@ Errores típicos:
 
 ---
 
-## 5. Operación
+## 5. Cómo conectarse (guía para clientes)
+
+Bases públicas (TLS siempre):
+
+```text
+REST: https://ws.seventwo.tech
+WS:   wss://ws.seventwo.tech/ws?token=JWT
+```
+
+> Desde dentro del VPS / Docker (`central_network`) puedes usar directo
+> `http://socket-core:3005` y `ws://socket-core:3005` (sin salir a internet).
+> El `/admin/*` **solo** funciona por localhost, nunca por el dominio público.
+
+### 5.1 El backend pide el JWT (los frontends nunca ven la API Key)
+
+```bash
+curl -X POST https://ws.seventwo.tech/auth/token \
+  -H "X-Api-Key: sc_live_..." -H "Origin: https://tu-frontend.com" \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"user-1","channel":"tuproyecto:chat:123","role":"both"}'
+# -> {"data":{"token":"eyJ...","expires_in":600,...}}
+```
+
+Mismo flujo en Node:
+
+```js
+const r = await fetch("https://ws.seventwo.tech/auth/token", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", "X-Api-Key": process.env.SOCKET_API_KEY, "Origin": "https://tu-frontend.com" },
+  body: JSON.stringify({ user_id: "user-1", channel: "tuproyecto:chat:123", role: "both" }),
+});
+const { data: { token } } = await r.json();
+```
+
+### 5.2 El frontend abre el WS y hace handshake
+
+```js
+const ws = new WebSocket(`wss://ws.seventwo.tech/ws?token=${token}`);
+
+// 1. Primer mensaje OBLIGATORIO tras conectar:
+ws.onopen = () => ws.send(JSON.stringify({ channel: "tuproyecto:chat:123", client_id: "front-1" }));
+
+// 2. Eventos que llegan (canal, sistema, mensajes):
+ws.onmessage = (e) => {
+  const ev = JSON.parse(e.data); // {id, channel, source, targets, payload, timestamp}
+  if (ev.payload?.type === "client_joined") return pintarPresencia(ev.payload);
+  if (ev.source === "__system__") return;
+  pintarMensaje(ev);
+};
+
+// 3. El JWT vive 10 min: al expirar el servidor cierra con aviso -> pedir otro y reconectar:
+ws.onmessage = (e) => {
+  const m = JSON.parse(e.data);
+  if (m.error === "token expirado, reconectar") return reconectar(); // pide JWT fresco al §5.1
+  /* ... */
+};
+ws.onclose = () => setTimeout(reconectar, 2000); // reintento simple
+```
+
+Prueba desde terminal (`npm i -g wscat`):
+
+```bash
+wscat -c "wss://ws.seventwo.tech/ws?token=$TOK"
+# > {"channel":"tuproyecto:chat:123","client_id":"terminal-1"}
+```
+
+### 5.3 El backend publica (REST con API Key, o WS con rol publish)
+
+```bash
+curl -X POST https://ws.seventwo.tech/channels/<CHANNEL_ID>/events \
+  -H "X-Api-Key: sc_live_..." -H "Content-Type: application/json" -d '{
+    "source": "mi-backend",
+    "targets": ["*"],
+    "payload": {"msg": "hola mundo"}
+  }'
+```
+
+`targets: ["*"]` = todos los suscritos; o `["front-1","front-2"]` para dirigidos.
+Desde el WS también se emite escribiendo el JSON del payload (requiere rol `publish`/`both`).
+
+### 5.4 Reglas que no perdonan
+
+- Sin `?token=` no hay upgrade (`401`). Con JWT de otro canal/prefijo: `{"error":"No autorizado"}` y cierre.
+- JWT `subscribe` entra pero no emite; `publish` emite pero ojo: para suscribirse necesita `subscribe`/`both`.
+- El WS se corta al expirar el JWT: **siempre** implementa pedir-token + reconectar.
+- `curl` no habla `wss://`: para probar el handshake usa `https://.../ws` con headers `Upgrade` (ver §3 paso 6).
+
+## 6. Operación
 
 - **Backups que importan:** `.env` (secretos) y `data/socket-core.db` (keys + revocaciones). El workflow de deploy los preserva solos en cada despliegue.
 - **Exposición pública (`ws.seventwo.tech`):** el deploy instala `nginx/` (puertos 80/443, TLS, rate-limits, `/admin/` solo-localhost, logs sin `?token=`) y `fail2ban/` (30×401/403 en 5 min → ban 1h). El certificado se crea con `certbot certonly --webroot` **solo si falta y solo para ese dominio**; `nginx -t` corre antes de cada reload para no tumbar los demás dominios.
@@ -275,7 +362,7 @@ Errores típicos:
 - **Logs:** `docker compose logs -f socket-core` (`RUST_LOG=info`).
 - **Ponerlo detrás de TLS:** Nginx → `proxy_pass http://127.0.0.1:3005` (el compose solo expone loopback a propósito); el WS pasa con `Upgrade`/`Connection`.
 
-## 6. Código (mapa rápido)
+## 7. Código (mapa rápido)
 
 ```text
 src/
