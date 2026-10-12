@@ -139,25 +139,28 @@ def main() -> int:
             pintar(False, "nginx", (r.stdout or r.stderr or "").strip()[:80])
             alertas.append("nginx no activo")
 
-        cert = "/etc/letsencrypt/live/ws.seventwo.tech/fullchain.pem"
-        if os.path.isfile(cert):
-            out = subprocess.run(
-                f"openssl x509 -enddate -noout -in {cert}", shell=True,
-                capture_output=True, text=True, timeout=10,
-            ).stdout.strip()
+        host = args.core.split("://", 1)[-1].split("/", 1)[0].split(":")[0]
+        if args.core.startswith("https"):
+            # Lo que el mundo ve: handshake TLS con SNI (sin necesitar permisos root).
             try:
-                exp = datetime.datetime.strptime(out.split("=", 1)[1].strip(), "%b %d %H:%M:%S %Y %Z")
+                ctx = ssl.create_default_context()
+                with ctx.wrap_socket(
+                    __import__("socket").create_connection((host, 443), timeout=10),
+                    server_hostname=host,
+                ) as s:
+                    cert = s.getpeercert()
+                exp = datetime.datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
                 dias = (exp - datetime.datetime.utcnow()).days
                 if dias > 15:
-                    pintar(True, "cert ws.seventwo.tech", f"vence en {dias} días")
+                    pintar(True, f"cert {host}", f"vence en {dias} días")
                 else:
-                    pintar(False, "cert ws.seventwo.tech", f"vence en {dias} días")
+                    pintar(False, f"cert {host}", f"vence en {dias} días")
                     alertas.append("cert por vencer")
-            except Exception:
-                pintar(True, "cert ws.seventwo.tech", out)
+            except Exception as e:
+                pintar(False, f"cert {host}", str(e)[:100])
+                alertas.append("cert sin verificar")
         else:
-            pintar(False, "cert ws.seventwo.tech", "no existe")
-            alertas.append("sin certificado")
+            pintar(True, "cert (core sin TLS local, omitido)")
 
         r = sh("sudo -n fail2ban-client status socketcore-auth 2>&1 | grep -E 'Currently (failed|banned)'")
         if r and r.returncode == 0 and r.stdout.strip():
