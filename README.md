@@ -165,6 +165,10 @@ Guarda el `id` (vale también el `name` para el WS y los eventos):
 CH=<CHANNEL_ID>
 ```
 
+> Los canales se **persisten en SQLite**: sobreviven a reinicios y deploys conservando su `id`
+> (los JWT atados a ellos siguen valiendo). Lo que NO sobrevive son los clientes conectados:
+> al reiniciar, cada frontend reconecta solo. Tenlo en cuenta para la lógica de reconexión del §5.2.
+
 > El nombre debe respetar el `channel_prefix` de la key (`demo:otro` → `403`).
 
 ### Paso 5 — Suscribirse por WebSocket (requiere JWT)

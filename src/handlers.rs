@@ -59,7 +59,11 @@ pub async fn create_channel(
         .channel_manager
         .create_channel(req.name, req.description)
     {
-        Ok(channel) => (StatusCode::CREATED, Json(ApiResponse::ok(channel))).into_response(),
+        Ok(channel) => {
+            // Persistencia: el canal sobrevive a reinicios (los clientes no).
+            state.channel_manager.persist(&state.keys.pool, &channel).await;
+            (StatusCode::CREATED, Json(ApiResponse::ok(channel))).into_response()
+        }
         Err(e) => err(StatusCode::BAD_REQUEST, e),
     }
 }

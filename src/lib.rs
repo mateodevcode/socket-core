@@ -110,6 +110,15 @@ pub async fn serve(addr: SocketAddr) {
         limiter: middleware::RateLimiter::new(),
     };
 
+    // Restaurar canales persistidos (conservan sus IDs: los JWT siguen valiendo).
+    let restored = state
+        .channel_manager
+        .load_persisted(&state.keys.pool)
+        .await;
+    if restored > 0 {
+        tracing::info!("Canales restaurados: {}", restored);
+    }
+
     serve_with_config(addr, state, &cfg.allowed_origins).await
 }
 

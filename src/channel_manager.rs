@@ -154,6 +154,57 @@ impl ChannelManager {
             .sum();
         (channels, total_clients)
     }
+
+    /// Guarda/actualiza el registro del canal en SQLite (los clientes no se persisten).
+    pub async fn persist(&self, pool: &sqlx::SqlitePool, ch: &Channel) {
+        let _ = sqlx::query(
+            "INSERT INTO channels (id, name, description, created_at) VALUES (?,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET name=excluded.name, description=excluded.description",
+        )
+        .bind(&ch.id)
+        .bind(&ch.name)
+        .bind(&ch.description)
+        .bind(ch.created_at)
+        .execute(pool)
+        .await;
+    }
+
+    /// Recarga en memoria los canales persistidos (con broadcast y clientes frescos).
+    /// Los IDs se conservan, así que los JWT atados a un canal siguen valiendo tras reinicios.
+    pub async fn load_persisted(&self, pool: &sqlx::SqlitePool) -> usize {
+        let rows = sqlx::query_as::<_, (String, String, Option<String>, i64)>(
+            "SELECT id, name, description, created_at FROM channels",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+        let mut n = 0;
+        for (id, name, description, created_at) in rows {
+            if self.channels.contains_key(&id) {
+                continue;
+            }
+            let (tx, _) = broadcast::channel(1000);
+            self.channels.insert(
+                id.clone(),
+                ChannelData {
+                    channel: Channel {
+                        id,
+                        name,
+                        description,
+                        created_at,
+                        clients_count: 0,
+                    },
+                    tx,
+                    clients: DashMap::new(),
+                },
+            );
+            n += 1;
+        }
+        if n > 0 {
+            info!("Canales restaurados desde SQLite: {}", n);
+        }
+        n
+    }
 }
 
 impl Default for ChannelManager {

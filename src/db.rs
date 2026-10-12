@@ -58,6 +58,20 @@ pub async fn init_pool(database_url: &str) -> Result<SqlitePool, sqlx::Error> {
         .execute(&pool)
         .await?;
 
+    // Registro de canales: sobrevive a reinicios (los clientes/suscriptores no).
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS channels (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            description TEXT,
+            created_at INTEGER NOT NULL
+        );
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
     // Limpieza oportunista de JTIs expirados
     let now = chrono::Utc::now().timestamp();
     let _ = sqlx::query("DELETE FROM revoked_tokens WHERE exp < ?")
