@@ -82,6 +82,10 @@ jobs:
             sudo cp nginx/conf.d/socketcore-limits.conf /etc/nginx/conf.d/socketcore-limits.conf
             sudo mkdir -p /var/www/html
 
+            echo "→ Activando fase 80 ANTES del cert (el reto ACME debe responderlo este dominio, no el default)..."
+            sudo nginx -t
+            sudo systemctl reload nginx
+
             echo "→ Certificado: se crea SOLO si falta y SOLO para ws.seventwo.tech..."
             if [ ! -f /etc/letsencrypt/live/ws.seventwo.tech/fullchain.pem ]; then
               sudo certbot certonly --webroot -w /var/www/html \
