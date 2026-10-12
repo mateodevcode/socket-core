@@ -85,7 +85,7 @@ jobs:
             echo "→ Certificado: se crea SOLO si falta y SOLO para ws.seventwo.tech..."
             if [ ! -f /etc/letsencrypt/live/ws.seventwo.tech/fullchain.pem ]; then
               sudo certbot certonly --webroot -w /var/www/html \
-                -d ws.seventwo.tech --non-interactive --agree-tos --keep-until-expiry
+                -d ws.seventwo.tech --non-interactive --agree-tos
             else
               echo "→ Certificado ya existe, no se toca."
             fi
