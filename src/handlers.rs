@@ -103,6 +103,52 @@ pub async fn get_channel_clients(
     }
 }
 
+pub async fn delete_channel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id_or_name): Path<String>,
+) -> impl IntoResponse {
+    let key = match require_api_key(&state, &headers, "manage").await {
+        Ok(k) => k,
+        Err((c, m)) => return err(c, m),
+    };
+    // Acepta id o nombre.
+    let target_id = if state.channel_manager.get_channel(&id_or_name).is_some() {
+        id_or_name.clone()
+    } else {
+        match state
+            .channel_manager
+            .list_channels()
+            .into_iter()
+            .find(|c| c.name == id_or_name)
+        {
+            Some(c) => c.id,
+            None => return err(StatusCode::NOT_FOUND, "Channel not found"),
+        }
+    };
+    let name_lookup = state
+        .channel_manager
+        .get_channel(&target_id)
+        .map(|c| c.name);
+    let allowed = channel_allowed(&key, &target_id)
+        || name_lookup
+            .as_deref()
+            .map(|n| channel_allowed(&key, n))
+            .unwrap_or(false);
+    if !allowed {
+        return err(StatusCode::FORBIDDEN, "canal fuera de tu prefijo");
+    }
+    if state.channel_manager.remove_channel(&target_id) {
+        let _ = sqlx::query("DELETE FROM channels WHERE id = ?")
+            .bind(&target_id)
+            .execute(&state.keys.pool)
+            .await;
+        Json(ApiResponse::ok(json!({"deleted": true}))).into_response()
+    } else {
+        err(StatusCode::NOT_FOUND, "Channel not found")
+    }
+}
+
 pub async fn emit_event(
     State(state): State<AppState>,
     headers: HeaderMap,

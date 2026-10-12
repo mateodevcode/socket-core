@@ -49,6 +49,7 @@ pub fn build_router(state: AppState, allowed_origins: &[String]) -> Router {
         .route("/channels", post(handlers::create_channel))
         .route("/channels", get(handlers::list_channels))
         .route("/channels/:id", get(handlers::get_channel))
+        .route("/channels/:id", delete(handlers::delete_channel))
         .route("/channels/:id/clients", get(handlers::get_channel_clients))
         .route("/channels/:id/events", post(handlers::emit_event))
         // Admin (MASTER_KEY)

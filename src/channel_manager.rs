@@ -157,6 +157,12 @@ impl ChannelManager {
         (channels, total_clients)
     }
 
+    /// Elimina el canal de memoria. Los suscritos activos se desconectan solos
+    /// (el broadcast se cierra al caer el último Sender).
+    pub fn remove_channel(&self, channel_id: &str) -> bool {
+        self.channels.remove(channel_id).is_some()
+    }
+
     /// Guarda/actualiza el registro del canal en SQLite (los clientes no se persisten).
     pub async fn persist(&self, pool: &sqlx::SqlitePool, ch: &Channel) {
         let _ = sqlx::query(

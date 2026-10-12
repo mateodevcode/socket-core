@@ -252,6 +252,7 @@ curl $CORE/admin/keys -H "X-Master-Key: $MASTER_KEY"
 | GET | `/stats` | `X-Api-Key` | `{channels, total_clients}` |
 | GET/POST | `/channels` | `X-Api-Key` (crear exige scope `manage` + prefijo) | Body crear: `{name, description?}` |
 | GET | `/channels/:id` | `X-Api-Key` | `:id` = id o nada; acepta id |
+| DELETE | `/channels/:id` | `X-Api-Key` scope `manage` + prefijo | acepta id o nombre; borra de memoria y DB (no revive) |
 | GET | `/channels/:id/clients` | `X-Api-Key` | clientes del canal |
 | POST | `/channels/:id/events` | `X-Api-Key` (`publish`) o JWT (`publish`) | Body: `{source, targets, payload}` |
 | GET | `/ws?token=` | JWT (`subscribe`) o service key `sc_live_*` | handshake `{"channel","client_id"}` |
