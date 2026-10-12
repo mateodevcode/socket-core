@@ -4,6 +4,7 @@
 .env
 .env.production
 .env*.local
+.ops_key
 
 salida.md
 proyectos.md
