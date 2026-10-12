@@ -355,6 +355,51 @@ pub async fn admin_revoke_key(
     }
 }
 
+pub async fn admin_update_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateKeyRequest>,
+) -> impl IntoResponse {
+    if let Err((c, m)) = require_master(&headers, &state.master_key) {
+        return err(c, m);
+    }
+    match state
+        .keys
+        .update(
+            &id,
+            req.name,
+            req.domains,
+            req.channel_prefix,
+            req.scopes,
+            req.rate_limit_per_min,
+            req.expires_in_days,
+        )
+        .await
+    {
+        Ok(k) => Json(ApiResponse::ok(ApiKeyPublic {
+            id: k.id,
+            name: k.name,
+            domains: k.domains,
+            channel_prefixes: k.channel_prefixes,
+            scopes: k.scopes,
+            rate_limit_per_min: k.rate_limit_per_min,
+            expires_at: k.expires_at,
+            revoked: k.revoked,
+            created_at: k.created_at,
+        }))
+        .into_response(),
+        Err(e) => {
+            let code = if e == "key no encontrada" {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            err(code, e)
+        }
+    }
+}
+
 pub async fn admin_delete_key(
     State(state): State<AppState>,
     headers: HeaderMap,

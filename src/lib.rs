@@ -10,7 +10,7 @@ pub mod websocket;
 
 use axum::{
     extract::DefaultBodyLimit,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
     Router,
 };
 use handlers::AppState;
@@ -57,6 +57,7 @@ pub fn build_router(state: AppState, allowed_origins: &[String]) -> Router {
         .route("/admin/keys", post(handlers::admin_create_key))
         .route("/admin/keys/:id/revoke", post(handlers::admin_revoke_key))
         .route("/admin/keys/:id", delete(handlers::admin_delete_key))
+        .route("/admin/keys/:id", patch(handlers::admin_update_key))
         .route("/admin/tokens/revoke", post(handlers::admin_revoke_token))
         // WS (JWT / service key, pre-auth antes del upgrade)
         .route("/ws", get(websocket::websocket_handler))

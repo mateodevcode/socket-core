@@ -180,3 +180,14 @@ pub struct ApiKeyPublic {
 pub struct RevokeTokenRequest {
     pub jti: String,
 }
+
+#[derive(Debug, Deserialize, Default)]
+pub struct UpdateKeyRequest {
+    pub name: Option<String>,
+    pub domains: Option<Vec<String>>,
+    pub channel_prefix: Option<String>,
+    pub scopes: Option<Vec<String>>,
+    pub rate_limit_per_min: Option<i64>,
+    /// Días de vigencia desde hoy. null/omitido = no toca; 0 = sin expiración.
+    pub expires_in_days: Option<i64>,
+}

@@ -257,6 +257,7 @@ curl $CORE/admin/keys -H "X-Master-Key: $MASTER_KEY"
 | POST | `/channels/:id/events` | `X-Api-Key` (`publish`) o JWT (`publish`) | Body: `{source, targets, payload}` |
 | GET | `/ws?token=` | JWT (`subscribe`) o service key `sc_live_*` | handshake `{"channel","client_id"}` |
 | GET/POST | `/admin/keys` | `X-Master-Key` | listar / crear |
+| PATCH | `/admin/keys/:id` | `X-Master-Key` | edita solo lo enviado: `name, domains, channel_prefix, scopes, rate_limit_per_min, expires_in_days` (`0` = sin expiración) |
 | POST | `/admin/keys/:id/revoke` | `X-Master-Key` | revocación inmediata |
 | DELETE | `/admin/keys/:id` | `X-Master-Key` | borrado definitivo |
 | POST | `/admin/tokens/revoke?jti=` | `X-Master-Key` | revoca un JWT |

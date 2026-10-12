@@ -160,6 +160,118 @@ impl KeyStore {
             .unwrap_or(false)
     }
 
+    /// Edita solo los campos presentes. Devuelve la key actualizada o error.
+    pub async fn update(
+        &self,
+        id: &str,
+        name: Option<String>,
+        domains: Option<Vec<String>>,
+        channel_prefix: Option<String>,
+        scopes: Option<Vec<String>>,
+        rate_limit_per_min: Option<i64>,
+        expires_in_days: Option<i64>,
+    ) -> Result<ApiKey, String> {
+        if name.is_none()
+            && domains.is_none()
+            && channel_prefix.is_none()
+            && scopes.is_none()
+            && rate_limit_per_min.is_none()
+            && expires_in_days.is_none()
+        {
+            return Err("nada que actualizar".into());
+        }
+        if let Some(n) = &name {
+            if n.trim().is_empty() {
+                return Err("name vacío".into());
+            }
+        }
+        if let Some(r) = rate_limit_per_min {
+            if r < 0 {
+                return Err("rate_limit_per_min inválido".into());
+            }
+        }
+        let expires_at = expires_in_days.map(|d| {
+            if d <= 0 {
+                None
+            } else {
+                Some(chrono::Utc::now().timestamp() + d * 86400)
+            }
+        });
+        // expires_in_days: Some(None) = quitar expiración; None = no tocar.
+        // Se resuelve con CASE para no necesitar SQL dinámico.
+        let touch_exp = expires_in_days.is_some();
+        let exp_val = expires_at.flatten();
+        // Normalizar vacíos como en create (un [] no debe bloquearlo todo).
+        let domains_s = domains.map(|v| {
+            let j = v
+                .iter()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(",");
+            if j.is_empty() {
+                "*".to_string()
+            } else {
+                j
+            }
+        });
+        let prefix_s = channel_prefix.map(|s| {
+            if s.trim().is_empty() {
+                "*".to_string()
+            } else {
+                s
+            }
+        });
+        let scopes_s = scopes.map(|v| {
+            let j = v
+                .iter()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(",");
+            if j.is_empty() {
+                "publish,subscribe".to_string()
+            } else {
+                j
+            }
+        });
+
+        let res = sqlx::query(
+            "UPDATE api_keys SET
+                name = COALESCE(?, name),
+                domains = COALESCE(?, domains),
+                channel_prefix = COALESCE(?, channel_prefix),
+                scopes = COALESCE(?, scopes),
+                rate_limit_per_min = COALESCE(?, rate_limit_per_min),
+                expires_at = CASE WHEN ? THEN ? ELSE expires_at END
+             WHERE id = ?",
+        )
+        .bind(name)
+        .bind(domains_s)
+        .bind(prefix_s)
+        .bind(scopes_s)
+        .bind(rate_limit_per_min)
+        .bind(touch_exp)
+        .bind(exp_val)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| format!("DB error: {}", e))?;
+        if res.rows_affected() == 0 {
+            return Err("key no encontrada".into());
+        }
+        self.by_id(id).await.ok_or("key no encontrada".into())
+    }
+
+    async fn by_id(&self, id: &str) -> Option<ApiKey> {
+        sqlx::query_as::<_, ApiKeyRow>("SELECT * FROM api_keys WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()?
+            .map(ApiKey::from)
+    }
+
     /// Valida key cruda: hash, revocada, expirada.
     pub async fn validate(&self, raw_key: &str) -> Option<ApiKey> {
         let hash = hash_key(raw_key);
