@@ -366,6 +366,7 @@ Desde el WS también se emite escribiendo el JSON del payload (requiere rol `pub
 - **Rotar secretos:** cambia `JWT_SECRET`/`MASTER_KEY` en `.env`, `docker compose up -d`, y regenera las API keys (las viejas siguen hasheadas contra nada que cambie, pero los JWT viejos mueren al cambiar el secret).
 - **Logs:** `docker compose logs -f socket-core` (`RUST_LOG=info`).
 - **Monitoreo:** `python3 scripts/estado.py` muestra contenedor, health, stats, canales con conectados, Nginx, certificado y fail2ban, con veredicto final (`exit 0` = bien, `1` = alertas, apto para cron). Necesita una key ops (`ops-monitoreo`, prefijo `*`) vía `SOCKET_OPS_KEY`, `--key` o archivo `.ops_key`. Solo-core público desde cualquier PC: `... --solo-core --core https://ws.seventwo.tech`.
+- **Recrear `ops-monitoreo` (si se pierde o en un VPS nuevo):** `python3 scripts/alta_cliente.py` con nombre `ops-monitoreo`, dominios `*`, prefijo `*`, scopes por defecto, rate `600`, sin vigencia; guarda la `api_key` en `.ops_key` (ignorado por git). Bitácora privada completa: `proyectos/RUNBOOK.md` (solo vive en el VPS, nunca se commitea).
 - **Ponerlo detrás de TLS:** Nginx → `proxy_pass http://127.0.0.1:3005` (el compose solo expone loopback a propósito); el WS pasa con `Upgrade`/`Connection`.
 
 ## 7. Código (mapa rápido)
