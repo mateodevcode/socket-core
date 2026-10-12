@@ -4,3 +4,6 @@
 .env
 .env.production
 .env*.local
+
+salida.md
+proyectos.md

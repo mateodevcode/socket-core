@@ -270,6 +270,7 @@ Errores típicos:
 ## 5. Operación
 
 - **Backups que importan:** `.env` (secretos) y `data/socket-core.db` (keys + revocaciones). El workflow de deploy los preserva solos en cada despliegue.
+- **Exposición pública (`ws.seventwo.tech`):** el deploy instala `nginx/` (puertos 80/443, TLS, rate-limits, `/admin/` solo-localhost, logs sin `?token=`) y `fail2ban/` (30×401/403 en 5 min → ban 1h). El certificado se crea con `certbot certonly --webroot` **solo si falta y solo para ese dominio**; `nginx -t` corre antes de cada reload para no tumbar los demás dominios.
 - **Rotar secretos:** cambia `JWT_SECRET`/`MASTER_KEY` en `.env`, `docker compose up -d`, y regenera las API keys (las viejas siguen hasheadas contra nada que cambie, pero los JWT viejos mueren al cambiar el secret).
 - **Logs:** `docker compose logs -f socket-core` (`RUST_LOG=info`).
 - **Ponerlo detrás de TLS:** Nginx → `proxy_pass http://127.0.0.1:3005` (el compose solo expone loopback a propósito); el WS pasa con `Upgrade`/`Connection`.
