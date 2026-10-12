@@ -116,15 +116,30 @@ def main() -> int:
             pintar(False, "stats", b.get("error", f"HTTP {s}"))
             alertas.append("stats con error")
 
-        # 3. Canales + conectados
+        # 3. Canales + conectados, agrupados por proyecto
         s, b = get_json(f"{args.core}/channels", key)
         if s == 200:
             chans = b["data"]
+            por_proyecto: dict = {}
             print(f"\n-- canales ({len(chans)}) --")
+            print("  (existe = guardado en DB, sobrevive reinicios | expira = nunca | estado = en_uso/idle ahora mismo)")
             for c in sorted(chans, key=lambda x: x["name"]):
                 s2, b2 = get_json(f"{args.core}/channels/{c['id']}/clients", key)
-                nombres = ",".join(x["id"] for x in b2.get("data", [])) if s2 == 200 else "?"
-                print(f"  {c['name']:40} conectados={c['clients_count']:<4} [{nombres}]")
+                cli = b2.get("data", []) if s2 == 200 else []
+                for cl in cli:
+                    por_proyecto.setdefault(cl.get("project") or "desconocido", []).append(
+                        f"{cl['id']}@{c['name']}"
+                    )
+                nombres = ",".join(x["id"] for x in cli)
+                estado = "en_uso" if c["clients_count"] > 0 else "idle"
+                print(f"  {c['name']:30} existe=sí  estado={estado:<6} conectados={c['clients_count']:<4} expira=nunca  [{nombres}]")
+            print("\n-- conectados por proyecto --")
+            if por_proyecto:
+                for proj in sorted(por_proyecto):
+                    miembros = por_proyecto[proj]
+                    print(f"  {proj}: {len(miembros)} -> {', '.join(miembros)}")
+            else:
+                print("  (nadie conectado)")
         else:
             pintar(False, "lista de canales", b.get("error", f"HTTP {s}"))
             alertas.append("canales con error")

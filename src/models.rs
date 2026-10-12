@@ -54,6 +54,9 @@ impl Channel {
 pub struct ClientInfo {
     pub id: String,
     pub client_type: ClientType,
+    /// Proyecto dueño de la conexión (del JWT / service key). Para ver por proyecto.
+    #[serde(default)]
+    pub project: String,
     pub connected_at: i64,
 }
 

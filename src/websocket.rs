@@ -149,6 +149,7 @@ async fn handle_socket(
         &effective_id,
         client_id.clone(),
         ClientType::WebSocket,
+        claims.project_name.clone(),
     ) {
         Ok(tx) => tx,
         Err(e) => {

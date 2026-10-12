@@ -72,6 +72,7 @@ impl ChannelManager {
         channel_id: &str,
         client_id: String,
         client_type: ClientType,
+        project: String,
     ) -> Result<ChannelBroadcast, String> {
         let mut channel_data = self
             .channels
@@ -81,6 +82,7 @@ impl ChannelManager {
         let client_info = ClientInfo {
             id: client_id.clone(),
             client_type,
+            project,
             connected_at: chrono::Utc::now().timestamp(),
         };
 
