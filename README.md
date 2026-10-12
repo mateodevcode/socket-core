@@ -1,84 +1,294 @@
 # socket-core definitivo — hub seguro multi-proyecto
 
-Servicio único de transporte (REST + WebSocket) para todos los proyectos presentes y futuros.
-Seguridad: **API Key por proyecto (dominios + prefijo + scopes + revocable en SQLite) + JWT corto (5-15 min) emitido por el propio core**. Sin Tailscale.
+Servicio único de transporte en tiempo real (REST + WebSocket) para todos los proyectos presentes y futuros.
+Cada proyecto se conecta con sus propias credenciales y solo ve sus canales. Sin Tailscale.
 
-## Despliegue
+```text
+┌─────────────┐   X-Api-Key    ┌──────────────┐   JWT (10 min)   ┌──────────┐
+│ Tu backend  │ ─────────────▶ │ socket-core  │ ───────────────▶ │ Frontend │
+│ (servidor)  │  /auth/token   │  :3005       │  /ws?token=...   │ (naveg. ) │
+└─────────────┘                └──────────────┘                  └──────────┘
+        │ REST directo con X-Api-Key (emitir, crear canales) ▲
+        └────────────────────────────────────────────────────┘
+```
+
+---
+
+## 1. Cómo funciona (el modelo en 5 minutos)
+
+Hay **3 credenciales**, de mayor a menor poder:
+
+| Credencial | Qué es | Dónde vive | Poder |
+|---|---|---|---|
+| `MASTER_KEY` | Contraseña madre del core | Solo `.env` del VPS, nunca sale de ahí | Crear / listar / revocar / borrar API keys y JWTs (`/admin/*`) |
+| `API Key` (`sc_live_...`) | Identidad de **un proyecto** | Backend de cada proyecto (secreto) | Pedir JWTs, usar el REST, conectarse al WS como servicio |
+| `JWT` (`eyJ...`) | Pase temporal de **un usuario** | Frontend / cliente (vive 10 min) | Entrar al WS y hablar solo en su canal y rol |
+
+Cada API Key además lleva **candados propios**:
+
+- **`domains`**: desde qué orígenes web puede usarse (ej: `["https://panel.midominio.com"]`). Si el `Origin` no coincide → `403`. Sin `Origin` (backend-a-backend con curl) se permite, porque ya presenta la key.
+- **`channel_prefix`**: qué canales puede tocar (ej: `"monitoreo:*"`). `monitoreo` jamás ve ni emite en `jarvis:*`.
+- **`scopes`**: qué acciones (`publish`, `subscribe`, `manage`). Crear canales exige `manage`; emitir exige `publish`.
+- **`rate_limit_per_min`**: tope de peticiones por minuto de esa key (defecto 120).
+- **`expires_at` / `revoked`**: caducidad y revocación inmediata. Revocar = efecto instantáneo, sin redeploy.
+
+El JWT pide con la API Key y dura `JWT_TTL_SECS` (defecto 600 s). Lleva `channel` + `role` (`publish` / `subscribe` / `both`): un JWT `subscribe` no puede emitir, y uno atado a `demo:alertas` no entra a otro canal. El WS **corta la conexión al expirar** el JWT: el cliente pide otro y reconecta.
+
+---
+
+## 2. Despliegue
 
 ```bash
 cp .env.example .env
-# editar JWT_SECRET (openssl rand -hex 64) y MASTER_KEY (openssl rand -hex 32)
-# en prod: ALLOW_BOOTSTRAP=false, ALLOWED_ORIGINS=https://tu-dominio.com
+# Editar: JWT_SECRET (openssl rand -hex 64), MASTER_KEY (openssl rand -hex 32)
+# En prod: ALLOW_BOOTSTRAP=false, ALLOWED_ORIGINS=https://tu-dominio.com
 
-# local
+# Local
 cargo run
 
-# docker (red externa compartida con tus otros proyectos)
-docker network create central_network  # solo una vez
+# Docker (red externa compartida con tus otros proyectos)
+docker network create central_network   # solo una vez
 docker compose up -d --build
-curl http://127.0.0.1:3005/health
+curl http://127.0.0.1:3005/health       # {"status":"ok","service":"socket-core"}
 ```
 
-## Alta de un proyecto (otorgar acceso)
+En el VPS el deploy es automático por GitHub Actions (push a `main`); lo único manual es pegar el `.env` una vez. Ver `.github/workflows/deploy.yml`.
+
+---
+
+## 3. Paso a paso: de cero a mensaje en vivo
+
+Fija la base (cambia el host si es el VPS por dominio/Nginx):
 
 ```bash
-# 1. crear key ligada a dominios + prefijo de canales
-curl -X POST http://127.0.0.1:3005/admin/keys \
+CORE=http://127.0.0.1:3005
+```
+
+### Paso 1 — Salud del servicio (público, sin auth)
+
+```bash
+curl $CORE/health
+# {"status":"ok","service":"socket-core"}
+```
+
+### Paso 2 — Crear la API Key del proyecto (requiere `MASTER_KEY`)
+
+Solo el administrador del core hace esto, **una vez por proyecto**. La `api_key` se muestra **una sola vez**: guárdala en el backend del proyecto.
+
+```bash
+MASTER_KEY=$(grep ^MASTER_KEY= .env | cut -d= -f2)
+curl -X POST $CORE/admin/keys \
   -H "X-Master-Key: $MASTER_KEY" -H "Content-Type: application/json" -d '{
-    "name": "monitoreo",
+    "name": "demo",
     "domains": ["https://panel.midominio.com"],
-    "channel_prefix": "monitoreo:*",
-    "scopes": ["publish","subscribe","manage"],
+    "channel_prefix": "demo:*",
+    "scopes": ["publish", "subscribe", "manage"],
     "rate_limit_per_min": 120
   }'
-# -> devuelve {"api_key":"sc_live_..."} (mostrar UNA vez, guardar en backend del proyecto)
-
-# 2. revocar / borrar
-curl -X POST http://127.0.0.1:3005/admin/keys/<id>/revoke -H "X-Master-Key: $MASTER_KEY"
-curl -X DELETE http://127.0.0.1:3005/admin/keys/<id> -H "X-Master-Key: $MASTER_KEY"
-
-# 3. revocar un JWT concreto
-curl -X POST "http://127.0.0.1:3005/admin/tokens/revoke?jti=<jti>" \
-  -H "X-Master-Key: $MASTER_KEY" -H "Content-Type: application/json" -d '{}'
 ```
 
-## Uso por proyecto
+Respuesta (ejemplo):
+
+```json
+{"success":true,"data":{
+  "id":"<KEY_ID>",
+  "name":"demo",
+  "api_key":"sc_live_...",
+  "domains":["https://panel.midominio.com"],
+  "channel_prefix":"demo:*",
+  "scopes":["publish","subscribe","manage"],
+  "rate_limit_per_min":120,
+  "expires_at":null},"error":null}
+```
+
+Guarda `id` (para revocar) y `api_key` (para usar):
 
 ```bash
-# Backend: pide JWT corto con su API key (valida Origin vs domains de la key)
-curl -X POST http://127.0.0.1:3005/auth/token \
-  -H "X-Api-Key: sc_live_..." -H "Origin: https://panel.midominio.com" \
-  -H "Content-Type: application/json" -d '{"user_id":"user-1","channel":"monitoreo:alertas","role":"both"}'
-# -> {"token":"eyJ...","expires_in":600}
-
-# Backend emite (X-Api-Key con scope publish)
-curl -X POST http://127.0.0.1:3005/channels/<id>/events \
-  -H "X-Api-Key: sc_live_..." -H "Content-Type: application/json" -d '{
-    "source":"admin-agent","targets":["*"],"payload":{"msg":"hola"}
-  }'
-
-# Frontend WS (solo JWT, el core corta la conexión al expirar -> reconectar y pedir JWT nuevo)
-# ws://host:3005/ws?token=eyJ...
-# handshake: {"channel":"<id-o-nombre>","client_id":"front-1"}
+RAW=sc_live_...   # la api_key recibida
 ```
 
-## Endpoints
+> **Atajo:** en el VPS corre `python3 scripts/alta_cliente.py` — te pide nombre, dominios, prefijo, scopes y límite, confirma, y te imprime el bloque de credenciales listo para copiar (lee `MASTER_KEY` del `.env` local).
 
-| Método | Ruta | Auth |
-|---|---|---|
-| GET | /health | pública |
-| POST | /auth/token | X-Api-Key + Origin permitido |
-| GET | /stats, /channels, /channels/:id, /channels/:id/clients | X-Api-Key |
-| POST | /channels | X-Api-Key scope `manage` + canal en prefijo |
-| POST | /channels/:id/events | X-Api-Key `publish` o JWT `publish` |
-| GET | /ws?token=JWT | JWT (`subscribe`) o service key `sc_live_*` |
-| GET/POST/DELETE | /admin/keys... | X-Master-Key |
-| POST | /admin/tokens/revoke | X-Master-Key |
+> En local/dev puedes usar `"domains":["*"]`. En prod, siempre dominios reales.
 
-## Hardening incluido
+### Paso 3 — Pedir un JWT para un usuario (requiere `X-Api-Key`)
 
-- CORS estricto por `ALLOWED_ORIGINS` global + chequeo `Origin/Referer` por key (`keys.rs:origin_allowed`).
-- Aislamiento por `channel_prefix` (`monitoreo:*` no ve `jarvis:*`).
-- Rate-limit por key (configurable) + global por IP 600/min (`middleware.rs`).
-- Body 1MB, headers `nosniff` + `DENY frame`, `/stats` ya no pública, JWT con `jti` revocable y corte de WS al expirar.
-- Bind `127.0.0.1:3005` en compose (TLS en Nginx por delante).
+El **backend** del proyecto pide pases cortos para sus usuarios. El `Origin` debe estar en los `domains` de la key.
+
+```bash
+curl -X POST $CORE/auth/token \
+  -H "X-Api-Key: $RAW" -H "Origin: https://panel.midominio.com" \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"user-1","channel":"demo:alertas","role":"both"}'
+```
+
+Respuesta:
+
+```json
+{"success":true,"data":{
+  "token":"eyJ...",
+  "expires_in":600,
+  "channel":"demo:alertas",
+  "role":"both"},"error":null}
+```
+
+- `channel: "*"` = acceso a todo su prefijo (`demo:*`). Restringe al canal exacto siempre que puedas.
+- `role`: `subscribe` (solo escucha), `publish` (solo emite), `both` (las dos).
+- Si el canal pedido está fuera de su prefijo → `403`. Si el `Origin` no está en sus dominios → `403`.
+
+```bash
+TOK=eyJ...   # el token recibido
+```
+
+### Paso 4 — Crear el canal (requiere key con scope `manage`)
+
+```bash
+curl -X POST $CORE/channels \
+  -H "X-Api-Key: $RAW" -H "Content-Type: application/json" \
+  -d '{"name":"demo:alertas","description":"Alertas del panel demo"}'
+```
+
+Respuesta:
+
+```json
+{"success":true,"data":{
+  "id":"<CHANNEL_ID>",
+  "name":"demo:alertas",
+  "description":"Alertas del panel demo",
+  "created_at":1791788800,
+  "clients_count":0},"error":null}
+```
+
+Guarda el `id` (vale también el `name` para el WS y los eventos):
+
+```bash
+CH=<CHANNEL_ID>
+```
+
+> El nombre debe respetar el `channel_prefix` de la key (`demo:otro` → `403`).
+
+### Paso 5 — Suscribirse por WebSocket (requiere JWT)
+
+URL: `ws://HOST:3005/ws?token=JWT` (o `wss://` tras Nginx). Nada más conectar, el cliente **debe** mandar el handshake como primer mensaje:
+
+```json
+{"channel": "<CHANNEL_ID o name>", "client_id": "front-1"}
+```
+
+Ejemplo en navegador:
+
+```js
+const ws = new WebSocket(`ws://127.0.0.1:3005/ws?token=${TOK}`);
+ws.onopen = () => ws.send(JSON.stringify({ channel: "demo:alertas", client_id: "front-1" }));
+ws.onmessage = (e) => console.log("evento:", JSON.parse(e.data));
+// Al recibir {"error":"token expirado, reconectar"} -> pedir JWT nuevo al backend y reconectar.
+```
+
+Desde terminal (si tienes `wscat`: `npm i -g wscat`):
+
+```bash
+wscat -c "ws://127.0.0.1:3005/ws?token=$TOK"
+# > {"channel":"demo:alertas","client_id":"terminal-1"}
+# < {"id":"...","channel":"...","source":"__system__",...,"payload":{"type":"client_joined",...}}
+```
+
+Reglas del WS:
+
+- Sin token → `401` y no hay upgrade. Con token de otro canal → `{"error":"No autorizado para este canal"}` y se cierra.
+- JWT `subscribe`/`both` para entrar; solo `publish`/`both` pueden **emitir** escribiendo JSON por el socket (se re-emite a `*` del canal).
+- Al expirar el JWT el servidor cierra con `{"error":"token expirado, reconectar"}`: el frontend pide JWT fresco al backend y reconecta.
+
+### Paso 6 — Emitir un evento por REST (requiere key `publish` o JWT `publish`)
+
+El backend emite así (lo verán al instante todos los suscritos con `targets` que los incluya):
+
+```bash
+curl -X POST $CORE/channels/$CH/events \
+  -H "X-Api-Key: $RAW" -H "Content-Type: application/json" -d '{
+    "source": "mi-backend",
+    "targets": ["*"],
+    "payload": {"msg": "hola mundo", "nivel": "info"}
+  }'
+# {"success":true,"data":{"success":true}}
+```
+
+- `targets: ["*"]` = todos los suscritos; o lista de `client_id` para mensajes dirigidos.
+- El suscriptor recibe el `Event` completo: `{id, channel, source, targets, payload, timestamp}`.
+
+### Paso 7 — Inspeccionar (requiere `X-Api-Key`)
+
+```bash
+curl $CORE/stats -H "X-Api-Key: $RAW"                 # {"channels":1,"total_clients":2}
+curl $CORE/channels -H "X-Api-Key: $RAW"              # lista de canales
+curl $CORE/channels/$CH/clients -H "X-Api-Key: $RAW"  # clientes conectados al canal
+```
+
+### Paso 8 — Revocar (requiere `MASTER_KEY`)
+
+```bash
+# Quitar acceso a un PROYECTO entero (efecto inmediato)
+curl -X POST $CORE/admin/keys/<KEY_ID>/revoke -H "X-Master-Key: $MASTER_KEY"
+# Borrar la key definitivamente
+curl -X DELETE $CORE/admin/keys/<KEY_ID> -H "X-Master-Key: $MASTER_KEY"
+# Revocar un JWT concreto (sácale el jti decodificando el payload base64)
+curl -X POST "$CORE/admin/tokens/revoke?jti=<JTI>" \
+  -H "X-Master-Key: $MASTER_KEY" -H "Content-Type: application/json" -d '{}'
+# Ver todas las keys (sin exponer los secretos, solo metadatos)
+curl $CORE/admin/keys -H "X-Master-Key: $MASTER_KEY"
+```
+
+---
+
+## 4. Referencia de endpoints
+
+| Método | Ruta | Auth | Notas |
+|---|---|---|---|
+| GET | `/health` | pública | `{"status":"ok"}` |
+| POST | `/auth/token` | `X-Api-Key` + `Origin` permitido | Body: `{user_id?, channel? ("*"), role? ("both")}` |
+| GET | `/stats` | `X-Api-Key` | `{channels, total_clients}` |
+| GET/POST | `/channels` | `X-Api-Key` (crear exige scope `manage` + prefijo) | Body crear: `{name, description?}` |
+| GET | `/channels/:id` | `X-Api-Key` | `:id` = id o nada; acepta id |
+| GET | `/channels/:id/clients` | `X-Api-Key` | clientes del canal |
+| POST | `/channels/:id/events` | `X-Api-Key` (`publish`) o JWT (`publish`) | Body: `{source, targets, payload}` |
+| GET | `/ws?token=` | JWT (`subscribe`) o service key `sc_live_*` | handshake `{"channel","client_id"}` |
+| GET/POST | `/admin/keys` | `X-Master-Key` | listar / crear |
+| POST | `/admin/keys/:id/revoke` | `X-Master-Key` | revocación inmediata |
+| DELETE | `/admin/keys/:id` | `X-Master-Key` | borrado definitivo |
+| POST | `/admin/tokens/revoke?jti=` | `X-Master-Key` | revoca un JWT |
+
+Errores típicos:
+
+| Código | Significado |
+|---|---|
+| `401` | falta/rotó la credencial: sin `X-Api-Key`, key revocada/expirada, JWT inválido/expirado/revocado, WS sin token |
+| `403` | credencial válida pero sin permiso: `Origin` fuera de `domains`, canal fuera de `channel_prefix`, scope/rol insuficiente |
+| `404` | canal o key inexistente |
+| `429` | `rate_limit` de la key o de la IP excedido |
+
+---
+
+## 5. Operación
+
+- **Backups que importan:** `.env` (secretos) y `data/socket-core.db` (keys + revocaciones). El workflow de deploy los preserva solos en cada despliegue.
+- **Rotar secretos:** cambia `JWT_SECRET`/`MASTER_KEY` en `.env`, `docker compose up -d`, y regenera las API keys (las viejas siguen hasheadas contra nada que cambie, pero los JWT viejos mueren al cambiar el secret).
+- **Logs:** `docker compose logs -f socket-core` (`RUST_LOG=info`).
+- **Ponerlo detrás de TLS:** Nginx → `proxy_pass http://127.0.0.1:3005` (el compose solo expone loopback a propósito); el WS pasa con `Upgrade`/`Connection`.
+
+## 6. Código (mapa rápido)
+
+```text
+src/
+  main.rs            arranque (ENV → config → DB → serve)
+  lib.rs             router + CORS estricto + headers de seguridad + serve()
+  config.rs          AppConfig desde ENV
+  db.rs              SQLite + schema (api_keys, revoked_tokens)
+  auth.rs            JWT (crear/validar) + hash y generación de API keys
+  keys.rs            KeyStore (CRUD/validar) + políticas: domains, prefijos, scopes
+  middleware.rs      require_master / require_api_key / require_jwt + rate-limit + Origin
+  handlers.rs        REST + /auth/token + /admin/*
+  websocket.rs       pre-auth antes del upgrade + autorización por canal/rol + corte al expirar JWT
+  channel_manager.rs canales en memoria (DashMap + broadcast)
+  models.rs          Event, Channel, DTOs de auth/admin
+```
+
+Tests: `cargo test` (políticas de origen/canal/scopes + roundtrip JWT).
