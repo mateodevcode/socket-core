@@ -6,11 +6,7 @@ use tracing::info;
 /// Inicializa el pool SQLite y corre el schema mínimo (idempotente).
 pub async fn init_pool(database_url: &str) -> Result<SqlitePool, sqlx::Error> {
     // Asegurar directorio padre para sqlite:./data/...
-    if let Some(path_part) = database_url
-        .trim_start_matches("sqlite:")
-        .split('?')
-        .next()
-    {
+    if let Some(path_part) = database_url.trim_start_matches("sqlite:").split('?').next() {
         if let Some(parent) = std::path::Path::new(path_part).parent() {
             if !parent.as_os_str().is_empty() {
                 let _ = std::fs::create_dir_all(parent);

@@ -11,7 +11,7 @@ pub const KEY_PREFIX: &str = "sc_live_";
 pub struct Claims {
     pub sub: String,          // user_id / client_id
     pub project_id: String,   // api_keys.id
-    pub project_name: String,  // api_keys.name
+    pub project_name: String, // api_keys.name
     pub channel: String,      // canal autorizado o "*" dentro del prefijo
     pub role: String,         // "publish" | "subscribe" | "both"
     pub jti: String,
@@ -87,7 +87,11 @@ pub fn decode_jwt(secret: &str, token: &str) -> Result<Claims, jsonwebtoken::err
 }
 
 /// Extrae token de `Authorization: Bearer <t>` o query `?token=<t>`.
-pub fn bearer_from_header(headers: &axum::http::HeaderMap, query_token: Option<&str>) -> Option<String> {    if let Some(auth) = headers.get(axum::http::header::AUTHORIZATION) {
+pub fn bearer_from_header(
+    headers: &axum::http::HeaderMap,
+    query_token: Option<&str>,
+) -> Option<String> {
+    if let Some(auth) = headers.get(axum::http::header::AUTHORIZATION) {
         if let Ok(s) = auth.to_str() {
             if let Some(t) = s.strip_prefix("Bearer ") {
                 return Some(t.trim().to_string());
@@ -111,10 +115,12 @@ mod tests {
 
     #[test]
     fn jwt_roundtrip_and_roles() {
-        let (tok, _) = create_jwt("secret-test", 600, "p1", "demo", "u1", "demo:a", "both").unwrap();
+        let (tok, _) =
+            create_jwt("secret-test", 600, "p1", "demo", "u1", "demo:a", "both").unwrap();
         let c = decode_jwt("secret-test", &tok).unwrap();
         assert!(c.can_publish() && c.can_subscribe());
-        let (tok2, _) = create_jwt("secret-test", 600, "p1", "demo", "u1", "*", "subscribe").unwrap();
+        let (tok2, _) =
+            create_jwt("secret-test", 600, "p1", "demo", "u1", "*", "subscribe").unwrap();
         let c2 = decode_jwt("secret-test", &tok2).unwrap();
         assert!(!c2.can_publish() && c2.can_subscribe());
         assert!(decode_jwt("otra-secret", &tok).is_err());

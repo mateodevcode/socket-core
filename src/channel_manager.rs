@@ -89,10 +89,7 @@ impl ChannelManager {
         channel_data.clients.insert(client_id.clone(), client_info);
         channel_data.channel.clients_count = channel_data.clients.len();
 
-        info!(
-            "Client {} subscribed to channel {}",
-            client_id, channel_id
-        );
+        info!("Client {} subscribed to channel {}", client_id, channel_id);
         Ok(channel_data.tx.clone())
     }
 
@@ -128,10 +125,7 @@ impl ChannelManager {
     }
 
     pub fn emit_event(&self, channel_id: &str, event: Event) -> Result<(), String> {
-        let channel_data = self
-            .channels
-            .get(channel_id)
-            .ok_or("Channel not found")?;
+        let channel_data = self.channels.get(channel_id).ok_or("Channel not found")?;
         debug!("Emitting event {} to channel {}", event.id, channel_id);
         let _ = channel_data.tx.send(event);
         Ok(())

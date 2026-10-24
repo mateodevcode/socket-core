@@ -161,6 +161,7 @@ impl KeyStore {
     }
 
     /// Edita solo los campos presentes. Devuelve la key actualizada o error.
+    #[allow(clippy::too_many_arguments)]
     pub async fn update(
         &self,
         id: &str,
@@ -341,7 +342,8 @@ pub fn origin_allowed(key: &ApiKey, origin: Option<&str>) -> bool {
             }
         }
         // comparar solo host si el dominio configurado no trae esquema
-        if !dd.contains("://") && (origin_host == dd || origin_host.ends_with(&format!(".{}", dd))) {
+        if !dd.contains("://") && (origin_host == dd || origin_host.ends_with(&format!(".{}", dd)))
+        {
             return true;
         }
     }
@@ -352,7 +354,13 @@ fn host_of(url_or_origin: &str) -> String {
     let s = url_or_origin
         .trim_start_matches("http://")
         .trim_start_matches("https://");
-    s.split('/').next().unwrap_or(s).split(':').next().unwrap_or(s).to_string()
+    s.split('/')
+        .next()
+        .unwrap_or(s)
+        .split(':')
+        .next()
+        .unwrap_or(s)
+        .to_string()
 }
 
 /// Canal permitido: prefixes ["*"] o ["monitoreo:*","jarvis:*"] o exactos.
@@ -374,7 +382,9 @@ pub fn channel_allowed(key: &ApiKey, channel: &str) -> bool {
 }
 
 pub fn has_scope(key: &ApiKey, scope: &str) -> bool {
-    key.scopes.iter().any(|s| s == scope || s == "admin" || s == "*")
+    key.scopes
+        .iter()
+        .any(|s| s == scope || s == "admin" || s == "*")
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 use crate::auth::create_jwt;
 use crate::channel_manager::ChannelManager;
 use crate::keys::{channel_allowed, ApiKey};
-use crate::middleware::{client_ip, RateLimiter, require_api_key, require_master};
+use crate::middleware::{client_ip, require_api_key, require_master, RateLimiter};
 use crate::models::*;
 use axum::{
     extract::{Path, Query, State},
@@ -61,7 +61,10 @@ pub async fn create_channel(
     {
         Ok(channel) => {
             // Persistencia: el canal sobrevive a reinicios (los clientes no).
-            state.channel_manager.persist(&state.keys.pool, &channel).await;
+            state
+                .channel_manager
+                .persist(&state.keys.pool, &channel)
+                .await;
             (StatusCode::CREATED, Json(ApiResponse::ok(channel))).into_response()
         }
         Err(e) => err(StatusCode::BAD_REQUEST, e),
@@ -186,12 +189,24 @@ pub async fn emit_event(
                     .channel_manager
                     .get_channel(&id)
                     .map(|c| c.name.clone());
-                if !crate::middleware::jwt_can_access_channel(&state, &claims, &id, name_lookup.as_deref()).await {
+                if !crate::middleware::jwt_can_access_channel(
+                    &state,
+                    &claims,
+                    &id,
+                    name_lookup.as_deref(),
+                )
+                .await
+                {
                     return err(StatusCode::FORBIDDEN, "jwt no autoriza este canal");
                 }
                 jwt_ok = true;
             }
-            Err((c, m)) => return err(c, format!("requiere X-Api-Key (publish) o JWT publish: {}", m)),
+            Err((c, m)) => {
+                return err(
+                    c,
+                    format!("requiere X-Api-Key (publish) o JWT publish: {}", m),
+                )
+            }
         }
     }
     let _ = (key_opt, jwt_ok);
@@ -232,7 +247,10 @@ pub async fn mint_token(
     let channel = req.channel.unwrap_or_else(|| "*".into());
     let role = req.role.unwrap_or_else(|| "both".into());
     if !["publish", "subscribe", "both"].contains(&role.as_str()) {
-        return err(StatusCode::BAD_REQUEST, "role debe ser publish|subscribe|both");
+        return err(
+            StatusCode::BAD_REQUEST,
+            "role debe ser publish|subscribe|both",
+        );
     }
     // El canal pedido debe estar dentro del prefijo del proyecto (salvo "*")
     if channel != "*" && !channel_allowed(&key, &channel) {
@@ -268,13 +286,19 @@ pub async fn mint_token(
             role,
         }))
         .into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("jwt error: {}", e)),
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("jwt error: {}", e),
+        ),
     }
 }
 
 // ---- Admin (MASTER_KEY) ----
 
-pub async fn admin_list_keys(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+pub async fn admin_list_keys(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     if let Err((c, m)) = require_master(&headers, &state.master_key) {
         return err(c, m);
     }
@@ -430,8 +454,7 @@ pub async fn admin_revoke_token(
         return err(c, m);
     }
     let jti = q.jti.or_else(|| {
-        body
-            .get("jti")
+        body.get("jti")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
     });

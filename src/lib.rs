@@ -8,6 +8,7 @@ pub mod middleware;
 pub mod models;
 pub mod websocket;
 
+use axum::http::{header, HeaderValue};
 use axum::{
     extract::DefaultBodyLimit,
     routing::{delete, get, patch, post},
@@ -17,7 +18,6 @@ use handlers::AppState;
 use std::net::SocketAddr;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
-use axum::http::{header, HeaderValue};
 
 /// Construye el Router completo del hub de transporte.
 /// Tanto el binario standalone como consumidores embebidos usan esto.
@@ -61,7 +61,7 @@ pub fn build_router(state: AppState, allowed_origins: &[String]) -> Router {
         .route("/admin/tokens/revoke", post(handlers::admin_revoke_token))
         // WS (JWT / service key, pre-auth antes del upgrade)
         .route("/ws", get(websocket::websocket_handler))
-        .layer(DefaultBodyLimit::max(1 * 1024 * 1024)) // 1MB hardening (antes 10MB)
+        .layer(DefaultBodyLimit::max(1024 * 1024)) // 1MB hardening (antes 10MB)
         .layer(cors)
         .layer(SetResponseHeaderLayer::if_not_present(
             header::X_CONTENT_TYPE_OPTIONS,
@@ -77,8 +77,16 @@ pub fn build_router(state: AppState, allowed_origins: &[String]) -> Router {
 /// Arranca el servidor socket-core en la addr dada (bloqueante).
 /// Mantiene compat con la firma vieja; usa ENV para secrets/DB.
 pub async fn serve(addr: SocketAddr) {
-    let _ = dotenv::dotenv();
+    let _ = dotenvy::dotenv();
     let cfg = config::AppConfig::from_env();
+    let state = init_state(&cfg).await;
+
+    serve_with_config(addr, state, &cfg.allowed_origins).await
+}
+
+/// Construye el AppState completo (pool DB + bootstrap dev) a partir de la config.
+/// Reutilizado por el binario y por los tests de integración (DB temporal aislada).
+pub async fn init_state(cfg: &config::AppConfig) -> handlers::AppState {
     let pool = db::init_pool(&cfg.database_url).await.expect("DB init");
     let keys = keys::KeyStore::new(pool);
 
@@ -103,7 +111,7 @@ pub async fn serve(addr: SocketAddr) {
         }
     }
 
-    let state = AppState {
+    let state = handlers::AppState {
         channel_manager: channel_manager::ChannelManager::new(),
         keys,
         jwt_secret: cfg.jwt_secret.clone(),
@@ -113,15 +121,25 @@ pub async fn serve(addr: SocketAddr) {
     };
 
     // Restaurar canales persistidos (conservan sus IDs: los JWT siguen valiendo).
-    let restored = state
-        .channel_manager
-        .load_persisted(&state.keys.pool)
-        .await;
+    let restored = state.channel_manager.load_persisted(&state.keys.pool).await;
     if restored > 0 {
         tracing::info!("Canales restaurados: {}", restored);
     }
+    state
+}
 
-    serve_with_config(addr, state, &cfg.allowed_origins).await
+/// Levanta el router en 127.0.0.1 con puerto aleatorio; diseñado para tests de integración.
+/// Devuelve la dirección real para que los tests la usen con sus clientes HTTP/WS.
+pub async fn start_test_server(state: AppState, allowed_origins: &[String]) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind puerto aleatorio");
+    let addr = listener.local_addr().expect("addr local");
+    let app = build_router(state, allowed_origins);
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("server test");
+    });
+    addr
 }
 
 pub async fn serve_with_config(addr: SocketAddr, state: AppState, allowed_origins: &[String]) {

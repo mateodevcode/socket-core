@@ -6,6 +6,12 @@ use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+impl Default for RateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Rate-limit fijo por ventana de 60s, clave = api_key_id o IP.
 #[derive(Clone)]
 pub struct RateLimiter {
@@ -92,15 +98,17 @@ pub async fn require_api_key(
     if raw.is_empty() {
         return Err((StatusCode::UNAUTHORIZED, "falta X-Api-Key".into()));
     }
-    let key = state
-        .keys
-        .validate(raw)
-        .await
-        .ok_or((StatusCode::UNAUTHORIZED, "api key inválida, revocada o expirada".into()))?;
+    let key = state.keys.validate(raw).await.ok_or((
+        StatusCode::UNAUTHORIZED,
+        "api key inválida, revocada o expirada".into(),
+    ))?;
 
     let origin = request_origin(headers);
     if !origin_allowed(&key, origin.as_deref()) {
-        return Err((StatusCode::FORBIDDEN, "origen no permitido para esta key".into()));
+        return Err((
+            StatusCode::FORBIDDEN,
+            "origen no permitido para esta key".into(),
+        ));
     }
     if !required_scope.is_empty() && !has_scope(&key, required_scope) {
         return Err((
@@ -189,7 +197,9 @@ pub async fn jwt_can_access_channel(
         if claims.channel.ends_with(":*") {
             let p = &claims.channel[..claims.channel.len() - 2];
             if target_channel_id_or_name.starts_with(p)
-                || channel_name_lookup.map(|n| n.starts_with(p)).unwrap_or(false)
+                || channel_name_lookup
+                    .map(|n| n.starts_with(p))
+                    .unwrap_or(false)
             {
                 return true;
             }
@@ -208,7 +218,11 @@ pub async fn jwt_can_access_channel(
         id: claims.project_id.clone(),
         name: claims.project_name.clone(),
         domains: vec!["*".into()],
-        channel_prefixes: prefix_s.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+        channel_prefixes: prefix_s
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
         scopes: vec![],
         rate_limit_per_min: 0,
         expires_at: None,
@@ -216,5 +230,7 @@ pub async fn jwt_can_access_channel(
         created_at: 0,
     };
     channel_allowed(&tmp, target_channel_id_or_name)
-        || channel_name_lookup.map(|n| channel_allowed(&tmp, n)).unwrap_or(false)
+        || channel_name_lookup
+            .map(|n| channel_allowed(&tmp, n))
+            .unwrap_or(false)
 }

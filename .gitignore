@@ -9,3 +9,5 @@
 salida.md
 proyectos.md
 proyectos/
+__pycache__/
+*.pyc

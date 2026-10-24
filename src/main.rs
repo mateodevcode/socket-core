@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 #[tokio::main]
 async fn main() {
-    let _ = dotenv::dotenv();
+    let _ = dotenvy::dotenv();
 
     tracing_subscriber::fmt()
         .with_env_filter(

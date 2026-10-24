@@ -66,8 +66,7 @@ async fn handle_socket(
                                 let _ = sender
                                     .send(Message::Text(
                                         json!({"error": "Missing channel or client_id"})
-                                            .to_string()
-                                            .into(),
+                                            .to_string(),
                                     ))
                                     .await;
                                 return;
@@ -76,9 +75,7 @@ async fn handle_socket(
                     }
                     _ => {
                         let _ = sender
-                            .send(Message::Text(
-                                json!({"error": "Invalid JSON"}).to_string().into(),
-                            ))
+                            .send(Message::Text(json!({"error": "Invalid JSON"}).to_string()))
                             .await;
                         return;
                     }
@@ -112,7 +109,7 @@ async fn handle_socket(
             None => {
                 let _ = sender
                     .send(Message::Text(
-                        json!({"error": "Channel not found"}).to_string().into(),
+                        json!({"error": "Channel not found"}).to_string(),
                     ))
                     .await;
                 return;
@@ -123,13 +120,10 @@ async fn handle_socket(
     if !jwt_can_access_channel(&state, &claims, &effective_id, Some(&name_for_check)).await
         && !jwt_can_access_channel(&state, &claims, &channel_id, Some(&name_for_check)).await
     {
-        warn!(
-            "WS sub={} sin acceso al canal {}",
-            claims.sub, channel_id
-        );
+        warn!("WS sub={} sin acceso al canal {}", claims.sub, channel_id);
         let _ = sender
             .send(Message::Text(
-                json!({"error": "No autorizado para este canal"}).to_string().into(),
+                json!({"error": "No autorizado para este canal"}).to_string(),
             ))
             .await;
         return;
@@ -139,7 +133,7 @@ async fn handle_socket(
     if !claims.can_subscribe() {
         let _ = sender
             .send(Message::Text(
-                json!({"error": "JWT sin rol subscribe"}).to_string().into(),
+                json!({"error": "JWT sin rol subscribe"}).to_string(),
             ))
             .await;
         return;
@@ -154,7 +148,7 @@ async fn handle_socket(
         Ok(tx) => tx,
         Err(e) => {
             let _ = sender
-                .send(Message::Text(json!({"error": e}).to_string().into()))
+                .send(Message::Text(json!({"error": e}).to_string()))
                 .await;
             return;
         }
@@ -197,7 +191,7 @@ async fn handle_socket(
                         let should_receive = event.targets.contains(&"*".to_string()) || event.targets.contains(&client_id);
                         if should_receive {
                             if let Ok(json_str) = serde_json::to_string(&event) {
-                                if let Err(e) = sender.send(Message::Text(json_str.into())).await {
+                                if let Err(e) = sender.send(Message::Text(json_str)).await {
                                     error!("Failed to send to client: {}", e);
                                     break;
                                 }
@@ -241,7 +235,7 @@ async fn handle_socket(
             }
             _ = tokio::time::sleep(timeout_dur), if jwt_exp != i64::MAX => {
                 info!("JWT expirado para {}, cerrando WS (re-auth requerida)", client_id);
-                let _ = sender.send(Message::Text(json!({"error": "token expirado, reconectar"}).to_string().into())).await;
+                let _ = sender.send(Message::Text(json!({"error": "token expirado, reconectar"}).to_string(),)).await;
                 break;
             }
         }
