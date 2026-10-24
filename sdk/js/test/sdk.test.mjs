@@ -538,3 +538,54 @@ test("publish durante reconexión => not_connected y luego vuelve", { timeout: 4
     await hub.cleanup();
   }
 });
+
+// ---------- S2: DB caída a mitad => server_error y reconexión al volver ----------
+
+test("DB caída a mitad => server_error y reconecta cuando vuelve", { timeout: 70000 }, async () => {
+  const hub = await setupHub();
+  const sdk = clientSdk(hub, "user-db");
+  const statuses = [];
+  const fatals = [];
+  sdk.on("status", (s) => statuses.push(s));
+  sdk.on("fatal", (f) => fatals.push(f));
+  try {
+    await waitStatus(sdk, "connected");
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(hub.dbPath);
+    db.exec("DROP TABLE revoked_tokens");
+    db.close();
+
+    // El watchdog (10 s) detecta el fallo de DB y cierra con server_error.
+    const reconn = await waitFor(() => statuses.includes("reconnecting"), 25000);
+    assert.ok(
+      reconn,
+      `debe reconectar tras server_error; statuses=${JSON.stringify(statuses)} fatals=${JSON.stringify(fatals)}`,
+    );
+    assert.equal(fatals.length, 0, "server_error NO debe ser fatal");
+
+    // La DB "vuelve": recreamos la tabla y debe reconectar.
+    const db2 = new DatabaseSync(hub.dbPath);
+    db2.exec(
+      "CREATE TABLE IF NOT EXISTS revoked_tokens (jti TEXT PRIMARY KEY, exp INTEGER NOT NULL)",
+    );
+    db2.close();
+
+    const ok = await waitFor(
+      () => statuses.filter((s) => s === "connected").length >= 2,
+      30000,
+    );
+    assert.ok(ok, `debe reconectar al volver la DB: ${JSON.stringify(statuses)}`);
+
+    const got = [];
+    sdk.on("message", (m) => got.push(m));
+    await hub.emit({ type: "chat", text: "db-vuelve" });
+    const recibido = await waitFor(
+      () => got.some((m) => m.payload?.text === "db-vuelve"),
+      8000,
+    );
+    assert.ok(recibido, "debe recibir tras recuperarse");
+  } finally {
+    sdk.close();
+    await hub.cleanup();
+  }
+});

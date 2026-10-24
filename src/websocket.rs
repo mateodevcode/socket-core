@@ -298,10 +298,13 @@ async fn handle_socket(
                 }
             }
 
-            // 2) Revalidación periódica de credenciales (fail-closed).
+            // 2) Revalidación periódica de credenciales (fail-closed, pero distinguiendo
+            //    revocación real de un fallo interno de DB: este último es reintentable).
             _ = auth_tick.tick() => {
-                let still_ok = match state.keys.is_token_revoked(&claims.jti).await {
-                    Ok(false) => authorize_channel_for_jwt(
+                enum Estado { Ok, Revocado, FalloInterno }
+                let estado = match state.keys.is_token_revoked(&claims.jti).await {
+                    Ok(true) => Estado::Revocado,
+                    Ok(false) => match authorize_channel_for_jwt(
                         &state.channel_manager,
                         &state.keys.pool,
                         &claims,
@@ -309,13 +312,32 @@ async fn handle_socket(
                         ChannelAction::Subscribe,
                     )
                     .await
-                    .is_ok(),
-                    _ => false, // revocado o DB caída => denegar
+                    {
+                        Ok(_) => Estado::Ok,
+                        Err(AuthzError::Internal) => Estado::FalloInterno,
+                        Err(_) => Estado::Revocado,
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "WS {}: error de DB al revalidar el token: {}",
+                            connection_id,
+                            e
+                        );
+                        Estado::FalloInterno
+                    }
                 };
-                if !still_ok {
-                    info!("WS {} sin credenciales válidas en revalidación", connection_id);
-                    close_with(&mut sender, "credential_revoked", "credencial ya no es válida").await;
-                    break;
+                match estado {
+                    Estado::Ok => {}
+                    Estado::Revocado => {
+                        info!("WS {} sin credenciales válidas en revalidación", connection_id);
+                        close_with(&mut sender, "credential_revoked", "credencial ya no es válida").await;
+                        break;
+                    }
+                    Estado::FalloInterno => {
+                        warn!("WS {}: DB no disponible; cierre reintentable", connection_id);
+                        close_with(&mut sender, "server_error", "error interno temporal").await;
+                        break;
+                    }
                 }
             }
 
@@ -389,7 +411,7 @@ async fn handle_socket(
                                 .await;
                             continue;
                         }
-                        if authorize_channel_for_jwt(
+                        match authorize_channel_for_jwt(
                             &state.channel_manager,
                             &state.keys.pool,
                             &claims,
@@ -397,10 +419,20 @@ async fn handle_socket(
                             ChannelAction::Publish,
                         )
                         .await
-                        .is_err()
                         {
-                            close_with(&mut sender, "credential_revoked", "credencial sin acceso al canal").await;
-                            break;
+                            Ok(_) => {}
+                            Err(AuthzError::Internal) => {
+                                warn!(
+                                    "WS {}: DB no disponible al autorizar publish; cierre reintentable",
+                                    connection_id
+                                );
+                                close_with(&mut sender, "server_error", "error interno temporal").await;
+                                break;
+                            }
+                            Err(_) => {
+                                close_with(&mut sender, "credential_revoked", "credencial sin acceso al canal").await;
+                                break;
+                            }
                         }
                         let payload: serde_json::Value = match serde_json::from_str(&text) {
                             Ok(v) => v,

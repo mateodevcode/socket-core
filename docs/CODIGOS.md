@@ -15,6 +15,7 @@ la conexión se cierra después:
 | Código | Causa | Acción recomendada del cliente |
 |---|---|---|
 | `token_expired` | El JWT expiró durante la conexión (TTL típico 10 min). | **Reconectar** pidiendo un JWT nuevo al backend. El SDK lo hace solo y además renueva antes de expirar. |
+| `server_error` | Fallo interno temporal (p. ej. DB no disponible al revalidar la credencial). NO significa que la key esté revocada. | **Reconectar** con backoff+jitter (el SDK lo hace); si persiste, revisar la DB/logs. |
 | `credential_revoked` | La API key del proyecto fue revocada, borrada o editada (prefijo/scopes). | **No reconectar.** Es un cierre definitivo (`fatal`): avisar/cerrar sesión. |
 | `token_revoked` | El `jti` de este JWT fue revocado por el admin. | **No reconectar** con el mismo token; pedir uno nuevo solo si el backend lo autoriza. |
 | `forbidden` | Sin permiso: rol insuficiente para la acción, canal no cubierto por el claim, o publicación denegada. | **No reconectar** en bucle. Revisar rol/canal; en `publish`, el rol debe incluir `publish`. |

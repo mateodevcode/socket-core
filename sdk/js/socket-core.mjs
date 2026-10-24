@@ -39,6 +39,7 @@ const RECONNECT_CODES = new Set([
   "server_shutdown",
   "idle_timeout",
   "handshake_timeout",
+  "server_error",
 ]);
 
 /** Estrategia recomendada para un código de error del servidor. */
