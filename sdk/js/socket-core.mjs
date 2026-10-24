@@ -250,6 +250,7 @@ export function connect(options = {}) {
       return;
     }
     safeClose(state.active);
+    state.active = null;
     if (strategy === "rate_limited") {
       scheduleReconnect(RATE_LIMITED_MIN_WAIT_MS);
     } else {
@@ -319,6 +320,8 @@ export function connect(options = {}) {
       return;
     }
     if (sock !== state.active) return;
+    // El socket activo ya no sirve: publish debe fallar con not_connected.
+    state.active = null;
     // Cierre sin código de error => red/servidor caído: reconectar con backoff.
     scheduleReconnect();
   }
@@ -409,7 +412,11 @@ export function connect(options = {}) {
     async publish(payload, opts = {}) {
       if (state.closed) throw new Error("socket cerrado");
       if (state.fatal) throw new Error("conexión en estado fatal");
-      if (!state.active?.ready) throw new Error("no conectado");
+      if (!state.active?.ready) {
+        const e = new Error("not_connected: sin conexión activa");
+        e.code = "not_connected";
+        throw e;
+      }
       const body =
         payload && typeof payload === "object" && !Array.isArray(payload)
           ? { ...payload }

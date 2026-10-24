@@ -515,3 +515,26 @@ test("targets inválidos => invalid_payload no cierra la conexión", { timeout: 
   }
 });
 
+// ---------- S4: publish mientras se reconecta ----------
+
+test("publish durante reconexión => not_connected y luego vuelve", { timeout: 40000 }, async () => {
+  const hub = await setupHub();
+  const sdk = clientSdk(hub, "user-nc");
+  const statuses = [];
+  sdk.on("status", (s) => statuses.push(s));
+  try {
+    await waitStatus(sdk, "connected");
+    hub.child.kill();
+    await waitFor(() => statuses.includes("reconnecting"), 8000);
+    await assert.rejects(
+      () => sdk.publish({ type: "chat", text: "mientras" }),
+      (e) => e.code === "not_connected" || /no conectado/.test(e.message),
+    );
+    hub.child = await hub.restart();
+    await waitFor(() => statuses.filter((s) => s === "connected").length >= 2, 20000);
+    await sdk.publish({ type: "chat", text: "despues" });
+  } finally {
+    sdk.close();
+    await hub.cleanup();
+  }
+});
