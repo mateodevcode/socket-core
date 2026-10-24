@@ -40,6 +40,12 @@ pub struct Limits {
     pub auth_recheck_secs: u64,
     pub ping_interval_secs: u64,
     pub idle_timeout_secs: u64,
+    /// Peticiones por minuto por IP (se aplica ANTES de validar la key).
+    pub ip_rate_per_min: i64,
+    /// Fallos de MASTER_KEY antes de bloquear temporalmente.
+    pub admin_fail_max: u32,
+    /// Duración del bloqueo del listener admin.
+    pub admin_lock_secs: u64,
 }
 
 impl Default for Limits {
@@ -54,6 +60,9 @@ impl Default for Limits {
             auth_recheck_secs: 10,
             ping_interval_secs: WS_PING_INTERVAL_SECS,
             idle_timeout_secs: WS_IDLE_TIMEOUT_SECS,
+            ip_rate_per_min: 600,
+            admin_fail_max: 5,
+            admin_lock_secs: 60,
         }
     }
 }

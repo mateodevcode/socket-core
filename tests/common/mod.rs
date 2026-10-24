@@ -31,6 +31,7 @@ pub type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 pub struct Hub {
     pub base: String,
+    pub admin_base: String,
     pub client: Client,
     pub state: AppState,
     pub key_a: String,
@@ -46,8 +47,15 @@ impl Hub {
         Self::start_with_limits(socket_core::limits::Limits::default()).await
     }
 
-    /// Igual que `start` pero con límites personalizados (tests deterministas).
     pub async fn start_with_limits(limits: socket_core::limits::Limits) -> Self {
+        Self::start_with_options(limits, Vec::new()).await
+    }
+
+    /// Igual que `start` pero con límites y proxies de confianza personalizados.
+    pub async fn start_with_options(
+        limits: socket_core::limits::Limits,
+        trusted_proxies: Vec<ipnet::IpNet>,
+    ) -> Self {
         let db_dir = TempDir::new().expect("temp dir");
         let db_path = db_dir.path().join("test.db");
         let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
@@ -89,13 +97,21 @@ impl Hub {
             registry: socket_core::limits::ConnectionRegistry::new(),
             limits,
             publish_limits: socket_core::limits::ProjectPublishLimiters::new(),
+            dev_mode: true,
+            trusted_proxies,
+            audit: socket_core::audit::AuditLog::new(),
+            admin_guard: socket_core::middleware::AdminGuard::new(),
+            allowed_origins: vec![],
         };
 
         let addr = socket_core::start_test_server(state.clone(), &[]).await;
+        let admin_addr = socket_core::start_test_admin_server(state.clone()).await;
         let base = format!("http://{}", addr);
+        let admin_base = format!("http://{}", admin_addr);
 
         Self {
             base,
+            admin_base,
             client: Client::builder().build().expect("client"),
             state,
             key_a: raw_a,
@@ -257,7 +273,7 @@ impl Hub {
         scopes: &[&str],
     ) -> reqwest::Response {
         self.client
-            .post(format!("{}/admin/keys", self.base))
+            .post(format!("{}/admin/keys", self.admin_base))
             .header("x-master-key", MASTER_KEY)
             .json(&json!({"name": name, "channel_prefix": prefix, "scopes": scopes}))
             .send()
@@ -268,7 +284,7 @@ impl Hub {
     /// PATCH de key vía /admin/keys/:id (master).
     pub async fn admin_patch_key(&self, id: &str, body: Value) -> reqwest::Response {
         self.client
-            .patch(format!("{}/admin/keys/{}", self.base, id))
+            .patch(format!("{}/admin/keys/{}", self.admin_base, id))
             .header("x-master-key", MASTER_KEY)
             .json(&body)
             .send()

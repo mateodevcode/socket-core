@@ -153,6 +153,64 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
    del límite por conexión) y **watchdog configurable** (`auth_recheck_secs`,
    default 10 s). Al superar el agregado: `rate_limited` y cierre.
 
+
+### FASE 5 — Red, secretos y configuración
+
+#### Cambios incompatibles
+
+1. **Arranque estricto**: el proceso aborta si `JWT_SECRET` es el valor por defecto
+   o <32 caracteres, `MASTER_KEY` <32, `JWT_TTL_SECS` fuera de [60,3600], o
+   `ALLOWED_ORIGINS` vacío/`*` con `APP_ENV!=dev`. `.env` existentes deben revisarse.
+   Nuevas variables: `APP_ENV`, `ADMIN_PORT` (3015), `TRUSTED_PROXIES`,
+   `SHUTDOWN_GRACE_SECS` (10).
+
+2. **`ALLOW_BOOTSTRAP` ahora es `false` por defecto**. Si se activa y la DB está
+   vacía, la key se escribe en `./data/bootstrap-key.txt` con permisos `0600`;
+   **nunca** se loguea en claro (solo la ruta).
+
+3. **`/admin/*` sale del puerto público**: se sirve en `ADMIN_PORT` escuchando en
+   `127.0.0.1` (no publicado por Docker ni alcanzable desde otros contenedores).
+   En el puerto público responden **404**. Operación: `docker exec socket-core
+   curl -H "X-Master-Key: ..." http://127.0.0.1:3015/admin/stats`.
+
+4. **IP del cliente**: `X-Forwarded-For`/`X-Real-IP` SOLO se leen si la IP del socket
+   está en `TRUSTED_PROXIES` (IPs/CIDR, vacío por defecto). De XFF se usa el último
+   valor. Se elimina el placeholder `"unknown"`. Nginx debe sobrescribir con
+   `$remote_addr` (actualizado en `nginx/`).
+
+5. **Rate limit por IP antes de validar la key** (las keys inválidas también
+   consumen cupo) y **429 con `Retry-After`**. Las respuestas 401/403 no cambian.
+
+6. **Listener admin endurecido**: bloqueo temporal tras 5 fallos de `MASTER_KEY`
+   (60 s), comparación en tiempo constante (`subtle`) y errores genéricos.
+
+7. **Nuevo `GET /admin/stats`** (global por proyecto: canales, conexiones, clientes;
+   sin payloads). `scripts/estado.py` ahora usa este endpoint con `MASTER_KEY`
+   (`SOCKET_MASTER_KEY`), ya no requiere una key con prefijo `*`.
+
+8. **Errores sin detalles internos**: los fallos de DB/JWT hacia el cliente son
+   mensajes genéricos (500 `internal error`); el detalle va solo al log.
+
+9. **Auditoría**: log estructurado (`target=audit`) con `project`, `action` y
+   `outcome` para altas/ediciones/revocaciones/borrados de keys, revocación de
+   tokens, borrado de canales y autenticaciones fallidas. Nunca incluye secretos.
+
+10. **Presencia mínima en eventos**: `client_joined`/`client_left` llevan solo
+    `{user, connection_id, total_clients}`. La lista completa solo por
+    `GET /channels/:id/clients` (con authz). Consumidores que leían `payload.clients`
+    deben migrar a ese endpoint.
+
+11. **Apagado con gracia**: `SHUTDOWN_GRACE_SECS` (10 s) limita el tiempo total;
+    pasado ese plazo el proceso termina aunque queden WS abiertos.
+
+#### Documentado (sin cambios de código)
+
+- `domains` solo protege el uso desde navegador y solo al emitir el JWT; no se
+  comprueba en el WebSocket.
+- En REST el `source` lo fija el backend; los frontends no deben usarlo para
+  decisiones de seguridad.
+- `sub` debe ser un ID opaco (no email): se muestra al resto del canal.
+
 ### Nota de estado
 
 - La suite de integración en `tests/` define el comportamiento objetivo: los

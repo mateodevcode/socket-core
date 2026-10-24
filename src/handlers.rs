@@ -5,7 +5,7 @@ use crate::authz::{
 use crate::channel_manager::ChannelManager;
 use crate::control::{ControlBus, ControlEvent};
 use crate::limits::{ConnectionRegistry, Limits, ProjectPublishLimiters};
-use crate::middleware::{client_ip, require_api_key, require_jwt, require_master, RateLimiter};
+use crate::middleware::{require_api_key, require_jwt, require_master, ClientIp, RateLimiter};
 use crate::models::*;
 use axum::{
     extract::{Path, Query, State},
@@ -28,6 +28,11 @@ pub struct AppState {
     pub registry: ConnectionRegistry,
     pub limits: Limits,
     pub publish_limits: ProjectPublishLimiters,
+    pub dev_mode: bool,
+    pub trusted_proxies: Vec<ipnet::IpNet>,
+    pub audit: crate::audit::AuditLog,
+    pub admin_guard: crate::middleware::AdminGuard,
+    pub allowed_origins: Vec<String>,
 }
 
 pub async fn health() -> impl IntoResponse {
@@ -51,8 +56,12 @@ fn has_api_key(headers: &HeaderMap) -> bool {
 
 // ---- REST protegida ----
 
-pub async fn stats(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    let key = match require_api_key(&state, &headers, "").await {
+pub async fn stats(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ip: ClientIp,
+) -> impl IntoResponse {
+    let key = match require_api_key(&state, &headers, "", ip.0).await {
         Ok(k) => k,
         Err(v) => return err(v.0, v.1),
     };
@@ -67,9 +76,10 @@ pub async fn stats(State(state): State<AppState>, headers: HeaderMap) -> impl In
 pub async fn create_channel(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ip: ClientIp,
     Json(req): Json<CreateChannelRequest>,
 ) -> impl IntoResponse {
-    let key = match require_api_key(&state, &headers, "manage").await {
+    let key = match require_api_key(&state, &headers, "manage", ip.0).await {
         Ok(k) => k,
         Err(v) => return err(v.0, v.1),
     };
@@ -105,8 +115,12 @@ pub async fn create_channel(
     (StatusCode::CREATED, Json(ApiResponse::ok(channel))).into_response()
 }
 
-pub async fn list_channels(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    let key = match require_api_key(&state, &headers, "").await {
+pub async fn list_channels(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ip: ClientIp,
+) -> impl IntoResponse {
+    let key = match require_api_key(&state, &headers, "", ip.0).await {
         Ok(k) => k,
         Err(v) => return err(v.0, v.1),
     };
@@ -119,9 +133,10 @@ pub async fn list_channels(State(state): State<AppState>, headers: HeaderMap) ->
 pub async fn get_channel(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ip: ClientIp,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let key = match require_api_key(&state, &headers, "").await {
+    let key = match require_api_key(&state, &headers, "", ip.0).await {
         Ok(k) => k,
         Err(v) => return err(v.0, v.1),
     };
@@ -137,9 +152,10 @@ pub async fn get_channel(
 pub async fn get_channel_clients(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ip: ClientIp,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let key = match require_api_key(&state, &headers, "").await {
+    let key = match require_api_key(&state, &headers, "", ip.0).await {
         Ok(k) => k,
         Err(v) => return err(v.0, v.1),
     };
@@ -155,9 +171,10 @@ pub async fn get_channel_clients(
 pub async fn delete_channel(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ip: ClientIp,
     Path(id_or_name): Path<String>,
 ) -> impl IntoResponse {
-    let key = match require_api_key(&state, &headers, "manage").await {
+    let key = match require_api_key(&state, &headers, "manage", ip.0).await {
         Ok(k) => k,
         Err(v) => return err(v.0, v.1),
     };
@@ -180,6 +197,9 @@ pub async fn delete_channel(
         return err(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
     }
     if state.channel_manager.remove_channel(&target_id) {
+        state
+            .audit
+            .record(Some(&key.id), "channel_delete", &target_id);
         // Cierra explícitamente las conexiones suscritas a este canal.
         state
             .control
@@ -193,13 +213,14 @@ pub async fn delete_channel(
 pub async fn emit_event(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ip: ClientIp,
     Path(id): Path<String>,
     Json(req): Json<EmitEventRequest>,
 ) -> impl IntoResponse {
     // Ramas EXCLUSIVAS: si hay X-Api-Key, esa rama manda y su error es definitivo.
     // Si no la hay, solo JWT. Sin fallback cruzado.
     let effective_id = if has_api_key(&headers) {
-        let key = match require_api_key(&state, &headers, "publish").await {
+        let key = match require_api_key(&state, &headers, "publish", ip.0).await {
             Ok(k) => k,
             Err(v) => return err(v.0, v.1),
         };
@@ -227,7 +248,7 @@ pub async fn emit_event(
     };
 
     // Rate extra por IP emisora (fase de red ajustará la confianza en XFF)
-    let ip_bucket = format!("emit:{}", client_ip(&headers));
+    let ip_bucket = format!("emit:{}", ip.0);
     if !state.limiter.check(&ip_bucket, 600) {
         return err(StatusCode::TOO_MANY_REQUESTS, "rate limit por IP");
     }
@@ -258,9 +279,10 @@ pub async fn emit_event(
 pub async fn mint_token(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ip: ClientIp,
     Json(req): Json<TokenRequest>,
 ) -> impl IntoResponse {
-    let key = match require_api_key(&state, &headers, "").await {
+    let key = match require_api_key(&state, &headers, "", ip.0).await {
         Ok(k) => k,
         Err(v) => return err(v.0, v.1),
     };
@@ -325,8 +347,9 @@ pub async fn mint_token(
 pub async fn admin_list_keys(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ip: ClientIp,
 ) -> impl IntoResponse {
-    if let Err((c, m)) = require_master(&headers, &state.master_key) {
+    if let Err((c, m)) = require_master(&state, &headers, ip.0) {
         return err(c, m);
     }
     let keys = match state.keys.list().await {
@@ -356,9 +379,10 @@ pub async fn admin_list_keys(
 pub async fn admin_create_key(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ip: ClientIp,
     Json(req): Json<CreateKeyRequest>,
 ) -> impl IntoResponse {
-    if let Err((c, m)) = require_master(&headers, &state.master_key) {
+    if let Err((c, m)) = require_master(&state, &headers, ip.0) {
         return err(c, m);
     }
     if req.name.trim().is_empty() {
@@ -398,34 +422,48 @@ pub async fn admin_create_key(
         )
         .await
     {
-        Ok((k, raw)) => (
-            StatusCode::CREATED,
-            Json(ApiResponse::ok(CreateKeyResponse {
-                id: k.id,
-                name: k.name,
-                api_key: raw,
-                domains: k.domains,
-                channel_prefix: k.channel_prefixes.join(","),
-                scopes: k.scopes,
-                rate_limit_per_min: k.rate_limit_per_min,
-                expires_at: k.expires_at,
-            })),
-        )
-            .into_response(),
-        Err(e) => err(StatusCode::BAD_REQUEST, e),
+        Ok((k, raw)) => {
+            state.audit.record(Some(&k.id), "key_create", &k.name);
+            (
+                StatusCode::CREATED,
+                Json(ApiResponse::ok(CreateKeyResponse {
+                    id: k.id,
+                    name: k.name,
+                    api_key: raw,
+                    domains: k.domains,
+                    channel_prefix: k.channel_prefixes.join(","),
+                    scopes: k.scopes,
+                    rate_limit_per_min: k.rate_limit_per_min,
+                    expires_at: k.expires_at,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            let code = if e == "internal error" {
+                StatusCode::INTERNAL_SERVER_ERROR
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            err(code, e)
+        }
     }
 }
 
 pub async fn admin_revoke_key(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ip: ClientIp,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err((c, m)) = require_master(&headers, &state.master_key) {
+    if let Err((c, m)) = require_master(&state, &headers, ip.0) {
         return err(c, m);
     }
     match state.keys.revoke(&id).await {
-        Ok(true) => Json(ApiResponse::ok(json!({"revoked": true}))).into_response(),
+        Ok(true) => {
+            state.audit.record(Some(&id), "key_revoke", "ok");
+            Json(ApiResponse::ok(json!({"revoked": true}))).into_response()
+        }
         Ok(false) => err(StatusCode::NOT_FOUND, "key no encontrada"),
         Err(e) => {
             tracing::error!("admin_revoke_key: {}", e);
@@ -437,10 +475,11 @@ pub async fn admin_revoke_key(
 pub async fn admin_update_key(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ip: ClientIp,
     Path(id): Path<String>,
     Json(req): Json<UpdateKeyRequest>,
 ) -> impl IntoResponse {
-    if let Err((c, m)) = require_master(&headers, &state.master_key) {
+    if let Err((c, m)) = require_master(&state, &headers, ip.0) {
         return err(c, m);
     }
     if let Some(prefix) = req.channel_prefix.as_deref() {
@@ -476,18 +515,21 @@ pub async fn admin_update_key(
         )
         .await
     {
-        Ok(k) => Json(ApiResponse::ok(ApiKeyPublic {
-            id: k.id,
-            name: k.name,
-            domains: k.domains,
-            channel_prefixes: k.channel_prefixes,
-            scopes: k.scopes,
-            rate_limit_per_min: k.rate_limit_per_min,
-            expires_at: k.expires_at,
-            revoked: k.revoked,
-            created_at: k.created_at,
-        }))
-        .into_response(),
+        Ok(k) => {
+            state.audit.record(Some(&k.id), "key_update", &k.name);
+            Json(ApiResponse::ok(ApiKeyPublic {
+                id: k.id,
+                name: k.name,
+                domains: k.domains,
+                channel_prefixes: k.channel_prefixes,
+                scopes: k.scopes,
+                rate_limit_per_min: k.rate_limit_per_min,
+                expires_at: k.expires_at,
+                revoked: k.revoked,
+                created_at: k.created_at,
+            }))
+            .into_response()
+        }
         Err(e) => {
             let code = match e.as_str() {
                 "key no encontrada" => StatusCode::NOT_FOUND,
@@ -502,13 +544,17 @@ pub async fn admin_update_key(
 pub async fn admin_delete_key(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ip: ClientIp,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err((c, m)) = require_master(&headers, &state.master_key) {
+    if let Err((c, m)) = require_master(&state, &headers, ip.0) {
         return err(c, m);
     }
     match state.keys.delete(&id).await {
-        Ok(true) => Json(ApiResponse::ok(json!({"deleted": true}))).into_response(),
+        Ok(true) => {
+            state.audit.record(Some(&id), "key_delete", "ok");
+            Json(ApiResponse::ok(json!({"deleted": true}))).into_response()
+        }
         Ok(false) => err(StatusCode::NOT_FOUND, "key no encontrada"),
         Err(e) => {
             tracing::error!("admin_delete_key: {}", e);
@@ -525,10 +571,11 @@ pub struct RevokeQuery {
 pub async fn admin_revoke_token(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ip: ClientIp,
     Query(q): Query<RevokeQuery>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    if let Err((c, m)) = require_master(&headers, &state.master_key) {
+    if let Err((c, m)) = require_master(&state, &headers, ip.0) {
         return err(c, m);
     }
     let jti = q.jti.or_else(|| {
@@ -542,7 +589,10 @@ pub async fn admin_revoke_token(
     // exp aproximada: ahora + ttl (la limpieza la purga después)
     let exp = chrono::Utc::now().timestamp() + state.jwt_ttl_secs;
     match state.keys.revoke_token(&jti, exp).await {
-        Ok(_) => Json(ApiResponse::ok(json!({"revoked": true, "jti": jti}))).into_response(),
+        Ok(_) => {
+            state.audit.record(None, "token_revoke", &jti);
+            Json(ApiResponse::ok(json!({"revoked": true, "jti": jti}))).into_response()
+        }
         Err(e) => {
             tracing::error!("admin_revoke_token: {}", e);
             err(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
@@ -550,14 +600,50 @@ pub async fn admin_revoke_token(
     }
 }
 
+/// GET /admin/stats: visión global por proyecto (solo lectura, sin payloads).
+pub async fn admin_stats(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ip: ClientIp,
+) -> impl IntoResponse {
+    if let Err((c, m)) = require_master(&state, &headers, ip.0) {
+        return err(c, m);
+    }
+    let keys = match state.keys.list().await {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::error!("admin_stats: {}", e);
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+        }
+    };
+    let mut rows = Vec::new();
+    for k in keys {
+        let (channels, clients) = state.channel_manager.stats_for(&k.id);
+        let connections = state.registry.project_count(&k.id);
+        rows.push(json!({
+            "project_id": k.id,
+            "project_name": k.name,
+            "revoked": k.revoked,
+            "channels": channels,
+            "connections": connections,
+            "clients": clients,
+        }));
+    }
+    Json(ApiResponse::ok(json!({ "projects": rows }))).into_response()
+}
+
 fn err(code: StatusCode, msg: impl Into<String>) -> axum::response::Response {
-    (
-        code,
-        Json(ApiResponse::<()> {
-            success: false,
-            data: None,
-            error: Some(msg.into()),
-        }),
-    )
-        .into_response()
+    let body = Json(ApiResponse::<()> {
+        success: false,
+        data: None,
+        error: Some(msg.into()),
+    });
+    let mut resp = (code, body).into_response();
+    if code == StatusCode::TOO_MANY_REQUESTS {
+        resp.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_static("60"),
+        );
+    }
+    resp
 }

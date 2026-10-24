@@ -42,7 +42,10 @@ async fn admin_revoke_key_cierra_ws_abiertos() {
 
     let res = hub
         .client
-        .post(format!("{}/admin/keys/{}/revoke", hub.base, hub.project_a))
+        .post(format!(
+            "{}/admin/keys/{}/revoke",
+            hub.admin_base, hub.project_a
+        ))
         .header("x-master-key", common::MASTER_KEY)
         .send()
         .await
@@ -64,7 +67,7 @@ async fn editar_prefijo_de_key_cierra_ws_abiertos() {
 
     let res = hub
         .client
-        .patch(format!("{}/admin/keys/{}", hub.base, hub.project_a))
+        .patch(format!("{}/admin/keys/{}", hub.admin_base, hub.project_a))
         .header("x-master-key", common::MASTER_KEY)
         .json(&json!({"channel_prefix": "a:otro"}))
         .send()
@@ -88,7 +91,10 @@ async fn admin_revoke_jti_cierra_el_ws_de_ese_token() {
 
     let res = hub
         .client
-        .post(format!("{}/admin/tokens/revoke?jti={}", hub.base, jti))
+        .post(format!(
+            "{}/admin/tokens/revoke?jti={}",
+            hub.admin_base, jti
+        ))
         .header("x-master-key", common::MASTER_KEY)
         .json(&json!({}))
         .send()

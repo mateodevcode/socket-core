@@ -8,12 +8,16 @@ fn cfg(jwt: &str, master: &str) -> AppConfig {
     AppConfig {
         host: "127.0.0.1".into(),
         port: 0,
+        admin_port: 0,
         database_url: "sqlite::memory:".into(),
         jwt_secret: jwt.into(),
         jwt_ttl_secs: 600,
         master_key: master.into(),
         allowed_origins: vec![],
+        app_env: "prod".into(),
         allow_bootstrap: false,
+        trusted_proxies: vec![],
+        shutdown_grace_secs: 10,
     }
 }
 

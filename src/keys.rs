@@ -125,7 +125,10 @@ impl KeyStore {
         .bind(now)
         .execute(&self.pool)
         .await
-        .map_err(|e| format!("DB error: {}", e))?;
+        .map_err(|e| {
+            tracing::error!("create key: error de DB: {}", e);
+            "internal error".to_string()
+        })?;
 
         let key = ApiKey {
             id,
@@ -279,7 +282,10 @@ impl KeyStore {
         .bind(id)
         .execute(&self.pool)
         .await
-        .map_err(|e| format!("DB error: {}", e))?;
+        .map_err(|e| {
+            tracing::error!("create key: error de DB: {}", e);
+            "internal error".to_string()
+        })?;
         if res.rows_affected() == 0 {
             return Err("key no encontrada".into());
         }

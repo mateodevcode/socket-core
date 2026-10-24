@@ -10,7 +10,7 @@ async fn admin_sin_master_key_da_403() {
     let hub = common::Hub::start().await;
     let res = hub
         .client
-        .get(format!("{}/admin/keys", hub.base))
+        .get(format!("{}/admin/keys", hub.admin_base))
         .send()
         .await
         .unwrap();
@@ -27,7 +27,7 @@ async fn admin_con_master_incorrecta_da_401() {
     let hub = common::Hub::start().await;
     let res = hub
         .client
-        .get(format!("{}/admin/keys", hub.base))
+        .get(format!("{}/admin/keys", hub.admin_base))
         .header("x-master-key", "incorrecta")
         .send()
         .await
@@ -40,7 +40,7 @@ async fn admin_con_master_correcta_da_200() {
     let hub = common::Hub::start().await;
     let res = hub
         .client
-        .get(format!("{}/admin/keys", hub.base))
+        .get(format!("{}/admin/keys", hub.admin_base))
         .header("x-master-key", common::MASTER_KEY)
         .send()
         .await
@@ -64,7 +64,10 @@ async fn admin_revoke_de_jti_funciona_con_master() {
     let (jwt, jti) = hub.signed_claims("user-1", "a:chat", "both");
     let res = hub
         .client
-        .post(format!("{}/admin/tokens/revoke?jti={}", hub.base, jti))
+        .post(format!(
+            "{}/admin/tokens/revoke?jti={}",
+            hub.admin_base, jti
+        ))
         .header("x-master-key", common::MASTER_KEY)
         .json(&json!({}))
         .send()

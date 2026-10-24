@@ -2,7 +2,7 @@ use crate::authz::{authorize_channel_for_jwt, AuthzError, ChannelAction};
 use crate::control::ControlEvent;
 use crate::handlers::AppState;
 use crate::limits::{ConnectionRegistry, PublishWindow};
-use crate::middleware::client_ip;
+use crate::middleware::ClientIp;
 use crate::models::{validate_outbound, ClientType, Event, SYSTEM_SOURCE};
 use axum::{
     extract::{
@@ -42,6 +42,7 @@ pub async fn websocket_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     headers: HeaderMap,
+    ip: ClientIp,
     Query(params): Query<WsParams>,
 ) -> impl IntoResponse {
     // Gate previo: exige JWT ANTES del upgrade para no malgastar recursos.
@@ -78,10 +79,11 @@ pub async fn websocket_handler(
     }
 
     // Límite de conexiones por proyecto y por IP (slot reservado antes del upgrade).
-    let ip = client_ip(&headers);
+    let ip = ip.0;
+    let ip_key = ip.to_string();
     if !state.registry.try_register(
         &claims.project_id,
-        &ip,
+        &ip_key,
         state.limits.max_conns_project,
         state.limits.max_conns_ip,
     ) {
@@ -94,7 +96,7 @@ pub async fn websocket_handler(
     let guard = ConnGuard {
         registry: state.registry.clone(),
         project_id: claims.project_id.clone(),
-        ip,
+        ip: ip_key,
     };
 
     info!(
@@ -229,22 +231,25 @@ async fn handle_socket(
     );
     let mut rx = tx.subscribe();
 
-    // Presencia inicial: solo dentro del canal/proyecto.
-    if let Some(clients) = state.channel_manager.get_clients(&effective_id) {
-        let join_event = Event::new(
-            effective_id.clone(),
-            SYSTEM_SOURCE.to_string(),
-            vec!["*".to_string()],
-            json!({
-                "type": "client_joined",
-                "user": user_id,
-                "connection_id": connection_id,
-                "clients": clients,
-                "total_clients": clients.len()
-            }),
-        );
-        let _ = tx.send(join_event);
-    }
+    // Presencia mínima: solo la conexión afectada; la lista completa va por
+    // GET /channels/:id/clients (con authz), nunca en broadcasts.
+    let total_clients = state
+        .channel_manager
+        .get_clients(&effective_id)
+        .map(|c| c.len())
+        .unwrap_or(0);
+    let join_event = Event::new(
+        effective_id.clone(),
+        SYSTEM_SOURCE.to_string(),
+        vec!["*".to_string()],
+        json!({
+            "type": "client_joined",
+            "user": user_id,
+            "connection_id": connection_id,
+            "total_clients": total_clients
+        }),
+    );
+    let _ = tx.send(join_event);
 
     let jwt_exp = claims.exp;
 

@@ -153,15 +153,11 @@ impl ChannelManager {
                 user, connection_id, channel_id
             );
 
-            let clients: Vec<ClientInfo> = channel_data
-                .clients
-                .iter()
-                .map(|entry| entry.value().clone())
-                .collect();
-            left = Some((user, clients, channel_data.clients.len()));
+            left = Some((user, Vec::new(), channel_data.clients.len()));
         }
-        if let Some((user, clients, total)) = left {
+        if let Some((user, _clients, total)) = left {
             if let Some(channel_data) = self.channels.get(channel_id) {
+                // Presencia mínima: solo la conexión afectada, sin listas completas.
                 let leave_event = Event::new(
                     channel_id.to_string(),
                     crate::models::SYSTEM_SOURCE.to_string(),
@@ -170,7 +166,6 @@ impl ChannelManager {
                         "type": "client_left",
                         "user": user,
                         "connection_id": connection_id,
-                        "clients": clients,
                         "total_clients": total
                     }),
                 );

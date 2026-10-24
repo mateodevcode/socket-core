@@ -13,11 +13,10 @@ async fn main() {
 
     let cfg = socket_core::config::AppConfig::from_env();
 
-    if cfg.jwt_secret == "dev-change-me-please-rotate" {
-        tracing::warn!("JWT_SECRET por defecto en uso. Define JWT_SECRET en producción.");
-    }
-    if cfg.master_key.is_empty() {
-        tracing::warn!("MASTER_KEY vacío: endpoints /admin/* bloqueados hasta configurarlo.");
+    // Arranque estricto: aborta con mensaje claro (sin imprimir secretos).
+    if let Err(e) = cfg.validate_secrets().and_then(|_| cfg.validate_origins()) {
+        eprintln!("socket-core: configuración inválida: {}", e);
+        std::process::exit(1);
     }
 
     let addr: SocketAddr = cfg

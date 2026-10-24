@@ -40,8 +40,10 @@ El JWT pide con la API Key y dura `JWT_TTL_SECS` (defecto 600 s). Lleva `channel
 
 ```bash
 cp .env.example .env
-# Editar: JWT_SECRET (openssl rand -hex 64), MASTER_KEY (openssl rand -hex 32)
-# En prod: ALLOW_BOOTSTRAP=false, ALLOWED_ORIGINS=https://tu-dominio.com
+# Editar: JWT_SECRET (openssl rand -hex 64, >=32), MASTER_KEY (openssl rand -hex 32, >=32)
+# En prod: APP_ENV=prod, ALLOWED_ORIGINS=https://tu-dominio.com, ALLOW_BOOTSTRAP=false
+# El proceso NO arranca si faltan secretos fuertes o ALLOWED_ORIGINS (ver §6).
+# ADMIN_PORT (3015) es loopback del contenedor: no se publica en Docker.
 
 # Local
 cargo run
@@ -231,7 +233,7 @@ curl $CORE/channels/$CH/clients -H "X-Api-Key: $RAW"  # clientes conectados al c
 ### Paso 8 — Administrar keys (requiere `MASTER_KEY`, SOLO por localhost)
 
 ```bash
-ADMIN=http://127.0.0.1:3005   # /admin/* está bloqueado desde internet (Nginx solo-localhost)
+ADMIN=http://127.0.0.1:3015   # listener admin (loopback); desde el host: docker exec socket-core curl ...
 # Editar una key: solo lo enviado, aplica al instante sin reiniciar
 curl -X PATCH $ADMIN/admin/keys/<KEY_ID> \
   -H "X-Master-Key: $MASTER_KEY" -H "Content-Type: application/json" \
@@ -247,7 +249,22 @@ curl -X POST "$ADMIN/admin/tokens/revoke?jti=<JTI>" \
   -H "X-Master-Key: $MASTER_KEY" -H "Content-Type: application/json" -d '{}'
 # Ver todas las keys (sin exponer los secretos, solo metadatos)
 curl $ADMIN/admin/keys -H "X-Master-Key: $MASTER_KEY"
+# Estadísticas globales por proyecto (canales, conexiones, clientes) — sin payloads
+curl $ADMIN/admin/stats -H "X-Master-Key: $MASTER_KEY"
 ```
+
+---
+
+## 3.1 Hechos de seguridad que debes asumir
+
+- **`domains` solo protege desde navegador** y **solo al emitir el JWT** (`/auth/token`).
+  No se comprueba en el WebSocket ni protege llamadas de backend. Es una defensa
+  contra uso no autorizado del token desde webs ajenas, no un control de acceso.
+- **En REST, `source` lo fija el backend** que tiene la API key. En WS el servidor lo
+  sobrescribe con `proyecto:sub`. Los frontends **no deben confiar en `source`** para
+  decisiones de seguridad (cualquiera puede leerlo en un evento recibido).
+- **`sub` debe ser un ID opaco** (no un email): se muestra al resto del canal en
+  presencia (`/channels/:id/clients`) y en eventos de sistema (`user`).
 
 ---
 
@@ -256,19 +273,22 @@ curl $ADMIN/admin/keys -H "X-Master-Key: $MASTER_KEY"
 | Método | Ruta | Auth | Notas |
 |---|---|---|---|
 | GET | `/health` | pública | `{"status":"ok"}` |
-| POST | `/auth/token` | `X-Api-Key` + `Origin` permitido | Body: `{user_id?, channel? ("*"), role? ("both")}` |
+| POST | `/auth/token` | `X-Api-Key` + `Origin` permitido | Body: `{user_id (obligatorio), channel? ("*"), role? ("both")}` |
 | GET | `/stats` | `X-Api-Key` | `{channels, total_clients}` |
 | GET/POST | `/channels` | `X-Api-Key` (crear exige scope `manage` + prefijo) | Body crear: `{name, description?}` |
 | GET | `/channels/:id` | `X-Api-Key` | `:id` = id o nada; acepta id |
 | DELETE | `/channels/:id` | `X-Api-Key` scope `manage` + prefijo | acepta id o nombre; borra de memoria y DB (no revive) |
 | GET | `/channels/:id/clients` | `X-Api-Key` | clientes del canal |
 | POST | `/channels/:id/events` | `X-Api-Key` (`publish`) o JWT (`publish`) | Body: `{source, targets, payload}` |
-| GET | `/ws?token=` | JWT (`subscribe`) o service key `sc_live_*` | handshake `{"channel","client_id"}` |
-| GET/POST | `/admin/keys` | `X-Master-Key` | listar / crear |
+| GET | `/ws?token=` | SOLO JWT (`subscribe`); las API keys no son tokens | handshake `{"channel", "device?"}`; identidad = `sub` |
 | PATCH | `/admin/keys/:id` | `X-Master-Key` | edita solo lo enviado: `name, domains, channel_prefix, scopes, rate_limit_per_min, expires_in_days` (`0` = sin expiración) |
 | POST | `/admin/keys/:id/revoke` | `X-Master-Key` | revocación inmediata |
 | DELETE | `/admin/keys/:id` | `X-Master-Key` | borrado definitivo |
 | POST | `/admin/tokens/revoke?jti=` | `X-Master-Key` | revoca un JWT |
+| GET | `/admin/stats` | `X-Master-Key` | global por proyecto (sin payloads) |
+
+Las rutas `/admin/*` NO existen en el puerto público: se sirven en `ADMIN_PORT`
+(127.0.0.1, no publicado por Docker). `GET/POST /admin/keys` listan/crean keys.
 
 Errores típicos:
 
@@ -277,7 +297,7 @@ Errores típicos:
 | `401` | falta/rotó la credencial: sin `X-Api-Key`, key revocada/expirada, JWT inválido/expirado/revocado, WS sin token |
 | `403` | credencial válida pero sin permiso: `Origin` fuera de `domains`, canal fuera de `channel_prefix`, scope/rol insuficiente |
 | `404` | canal o key inexistente |
-| `429` | `rate_limit` de la key o de la IP excedido |
+| `429` | `rate_limit` de la key o de la IP excedido (incluye `Retry-After`) |
 
 ---
 

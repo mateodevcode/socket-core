@@ -7,6 +7,8 @@ services:
     restart: unless-stopped
     ports:
       # Solo loopback; el acceso externo entra por Nginx con TLS.
+      # ADMIN_PORT (3015) NO se publica: el panel admin vive en 127.0.0.1 del
+      # contenedor y solo es accesible vía `docker exec` (o túnel interno).
       - "127.0.0.1:3005:3005"
     env_file:
       - .env
@@ -14,6 +16,7 @@ services:
       - RUST_LOG=info
       - HOST=0.0.0.0
       - PORT=3005
+      - ADMIN_PORT=3015
       - DATABASE_URL=sqlite:/app/data/socket-core.db?mode=rwc
     volumes:
       - ./data:/app/data
