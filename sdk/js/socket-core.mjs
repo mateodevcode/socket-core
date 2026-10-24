@@ -1,4 +1,4 @@
-// socket-core SDK — un solo fichero, sin dependencias, navegador y Node >= 18.
+// socket-core SDK — un solo fichero, sin dependencias, navegador y Node >= 22.
 //
 //   import { connect } from "./socket-core.mjs";
 //   const sc = connect({
