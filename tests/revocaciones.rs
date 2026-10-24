@@ -32,7 +32,8 @@ async fn jti_revocado_cierra_ws_abierto() {
         .state
         .keys
         .revoke_token(&jti, chrono::Utc::now().timestamp() + 600)
-        .await;
+        .await
+        .expect("revoke_token");
     assert!(ok, "revocación de jti debe insertarse");
 
     let cerrada = common::waits_closed(&mut ws, Duration::from_secs(5)).await;
@@ -48,7 +49,7 @@ async fn key_revocada_inutiliza_jwt_de_inmediato() {
     let id_a = hub.create_channel_ok(Project::A, "a:chat").await;
     let (jwt, _) = hub.signed_claims("user-1", "a:chat", "both");
 
-    hub.state.keys.revoke(&hub.project_a).await;
+    hub.state.keys.revoke(&hub.project_a).await.expect("revoke");
 
     let res = hub
         .emit_with_bearer(&jwt, &id_a, vec!["*".into()], json!({"x": 1}))
@@ -80,7 +81,7 @@ async fn key_revocada_cierra_sus_ws_abiertos() {
         .await
         .expect("conn abierta");
 
-    hub.state.keys.revoke(&hub.project_a).await;
+    hub.state.keys.revoke(&hub.project_a).await.expect("revoke");
 
     let cerrada = common::waits_closed(&mut ws, Duration::from_secs(5)).await;
     assert!(

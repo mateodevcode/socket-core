@@ -24,8 +24,10 @@ pub enum ChannelAction {
 pub enum AuthzError {
     NotFound,
     Forbidden,
-    /// La key/credencial que respalda al proyecto ya no está viva (revocada/borrada).
+    /// La key/credencial que respalda al proyecto ya no está viva (revocada/borrada/expirada).
     InvalidCredential,
+    /// Fallo interno al comprobar la credencial (DB). NUNCA se convierte en acceso.
+    Internal,
 }
 
 impl AuthzError {
@@ -37,6 +39,7 @@ impl AuthzError {
             AuthzError::InvalidCredential => {
                 (StatusCode::UNAUTHORIZED, "credential invalid or revoked")
             }
+            AuthzError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
         }
     }
 }
@@ -84,15 +87,25 @@ pub async fn authorize_channel_for_jwt(
     channel_id_or_name: &str,
     action: ChannelAction,
 ) -> Result<String, AuthzError> {
-    // La key que respaldó al JWT debe seguir viva: revocada o borrada => no vale.
-    let row = sqlx::query_as::<_, (i64,)>("SELECT revoked FROM api_keys WHERE id = ?")
-        .bind(&claims.project_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| AuthzError::InvalidCredential)?;
-    let alive = matches!(row, Some((0,)));
-    if !alive {
+    // La key que respaldó al JWT debe seguir viva: revocada, borrada o expirada => no vale.
+    let row = sqlx::query_as::<_, (i64, Option<i64>, String)>(
+        "SELECT revoked, expires_at, channel_prefix FROM api_keys WHERE id = ?",
+    )
+    .bind(&claims.project_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("authz: error consultando key {}: {}", claims.project_id, e);
+        AuthzError::Internal
+    })?;
+    let (revoked, expires_at, live_prefix) = row.ok_or(AuthzError::InvalidCredential)?;
+    if revoked != 0 {
         return Err(AuthzError::InvalidCredential);
+    }
+    if let Some(exp) = expires_at {
+        if chrono::Utc::now().timestamp() > exp {
+            return Err(AuthzError::InvalidCredential);
+        }
     }
 
     let Some(ch) = cm.resolve_channel(channel_id_or_name) else {
@@ -100,6 +113,26 @@ pub async fn authorize_channel_for_jwt(
     };
     if ch.project_id != claims.project_id {
         return Err(AuthzError::NotFound);
+    }
+
+    // Validación contra el PREFIJO VIVO de la key (si se recortó, los JWT viejos mueren).
+    let live_key = ApiKey {
+        id: claims.project_id.clone(),
+        name: claims.project_name.clone(),
+        domains: vec!["*".into()],
+        channel_prefixes: live_prefix
+            .split(',')
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .collect(),
+        scopes: vec![],
+        rate_limit_per_min: 0,
+        expires_at: None,
+        revoked: false,
+        created_at: 0,
+    };
+    if !channel_allowed(&live_key, &ch.name) {
+        return Err(AuthzError::Forbidden);
     }
 
     match action {

@@ -85,13 +85,45 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
    `client_type`, `project`, `connected_at`. La presencia solo es visible para el
    proyecto dueño del canal (404 para el resto).
 
+
+### FASE 4 — Ciclo de vida, revocación y límites
+
+#### Cambios incompatibles
+
+1. **JWT más estricto**: algoritmo fijado a **HS256**, `iss`/`aud` obligatorios y
+   validados (`socket-core`), leeway de 5 s. Los tokens emitidos con versiones
+   anteriores (sin `iss`/`aud`) son rechazados: deja expirar el TTL corto o pide
+   tokens nuevos tras el despliegue.
+
+2. **Revocación activa e inmediata**: revocar/borrar una key, editar su prefijo o
+   scopes, revocar un jti o borrar un canal **cierra los WebSockets afectados al
+   instante** (bus de control interno). Además hay revalidación cada 2 s como red
+   de seguridad (cubre cambios hechos directamente en la DB).
+
+3. **Fail-closed**: si la DB no responde al comprobar la revocación de un jti o la
+   vigencia de la key, la petición se deniega con **500** (nunca se asume válida).
+   Los errores internos no se exponen al cliente.
+
+4. **Gate de upgrade WS**: el proyecto debe existir, estar activo y no expirado.
+   Se valida el JWT contra el **prefijo vivo** de la key y se aplican límites:
+   50 conexiones por proyecto y 20 por IP (429 al superar).
+
+5. **Protecciones WS nuevas**: timeout de handshake 8 s, frame máximo 64 KB,
+   ping cada 30 s con idle timeout 120 s, rate limit de publicación 50/s por
+   conexión. Códigos de cierre: `handshake_timeout`, `token_expired`,
+   `credential_revoked`, `token_revoked`, `channel_deleted`, `server_shutdown`,
+   `rate_limited`, `message_too_large`, `idle_timeout`, `invalid_payload`,
+   `not_found`, `forbidden`. Un cliente lento recibe `{"type":"missed_events",
+   "missed":N}` en vez de un cierre silencioso.
+
+6. **Apagado ordenado**: SIGTERM/SIGINT cierran limpiamente los WS
+   (`server_shutdown`). Tarea periódica purga `revoked_tokens` expirados y
+   entradas viejas del rate limiter/registro.
+
 ### Nota de estado
 
-- La comprobación de revocación de jti ante fallo de DB sigue siendo fail-open;
-  el modo fail-closed y el corte activo de conexiones llegan con la fase de
-  ciclo de vida (4).
 - La suite de integración en `tests/` define el comportamiento objetivo: los
-  tests aún en rojo corresponden a fases 4-5 (límites de recursos, red/secretos).
+  tests aún en rojo corresponden a la fase 5 (red, secretos y configuración).
 
 #### Mantener en mente (no incompatible)
 

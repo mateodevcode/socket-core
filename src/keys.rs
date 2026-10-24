@@ -1,4 +1,5 @@
 use crate::auth::{generate_raw_key, hash_key};
+use crate::control::{ControlBus, ControlEvent};
 use chrono::Utc;
 use sqlx::{FromRow, SqlitePool};
 use uuid::Uuid;
@@ -56,19 +57,27 @@ fn split_csv(s: &str) -> Vec<String> {
 #[derive(Clone)]
 pub struct KeyStore {
     pub pool: SqlitePool,
+    pub control: ControlBus,
 }
 
 impl KeyStore {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            control: ControlBus::new(),
+        }
     }
 
-    pub async fn count(&self) -> i64 {
+    pub fn new_with_control(pool: SqlitePool, control: ControlBus) -> Self {
+        Self { pool, control }
+    }
+
+    /// Número de keys registradas. Fail-closed: propaga el error de DB.
+    pub async fn count(&self) -> Result<i64, sqlx::Error> {
         sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM api_keys")
             .fetch_one(&self.pool)
             .await
             .map(|r| r.0)
-            .unwrap_or(0)
     }
 
     /// Crea key y devuelve (ApiKey público, raw_key secreta una sola vez).
@@ -132,32 +141,42 @@ impl KeyStore {
         Ok((key, raw))
     }
 
-    pub async fn list(&self) -> Vec<ApiKey> {
-        sqlx::query_as::<_, ApiKeyRow>("SELECT * FROM api_keys ORDER BY created_at DESC")
-            .fetch_all(&self.pool)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(ApiKey::from)
-            .collect()
+    pub async fn list(&self) -> Result<Vec<ApiKey>, sqlx::Error> {
+        let rows =
+            sqlx::query_as::<_, ApiKeyRow>("SELECT * FROM api_keys ORDER BY created_at DESC")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows.into_iter().map(ApiKey::from).collect())
     }
 
-    pub async fn revoke(&self, id: &str) -> bool {
-        sqlx::query("UPDATE api_keys SET revoked = 1 WHERE id = ?")
+    /// Revoca una key. Cierra sus WS abiertos al instante (bus de control).
+    pub async fn revoke(&self, id: &str) -> Result<bool, sqlx::Error> {
+        let affected = sqlx::query("UPDATE api_keys SET revoked = 1 WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
-            .await
-            .map(|r| r.rows_affected() > 0)
-            .unwrap_or(false)
+            .await?
+            .rows_affected()
+            > 0;
+        if affected {
+            self.control
+                .send(ControlEvent::CloseProject(id.to_string()));
+        }
+        Ok(affected)
     }
 
-    pub async fn delete(&self, id: &str) -> bool {
-        sqlx::query("DELETE FROM api_keys WHERE id = ?")
+    /// Borra una key. Cierra sus WS abiertos al instante (bus de control).
+    pub async fn delete(&self, id: &str) -> Result<bool, sqlx::Error> {
+        let affected = sqlx::query("DELETE FROM api_keys WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
-            .await
-            .map(|r| r.rows_affected() > 0)
-            .unwrap_or(false)
+            .await?
+            .rows_affected()
+            > 0;
+        if affected {
+            self.control
+                .send(ControlEvent::CloseProject(id.to_string()));
+        }
+        Ok(affected)
     }
 
     /// Edita solo los campos presentes. Devuelve la key actualizada o error.
@@ -198,6 +217,9 @@ impl KeyStore {
                 Some(chrono::Utc::now().timestamp() + d * 86400)
             }
         });
+        // Si cambian prefijo o scopes, las conexiones abiertas deben reevaluarse:
+        // se cierran (los clientes reconectan con credenciales vigentes).
+        let security_changed = channel_prefix.is_some() || scopes.is_some();
         // expires_in_days: Some(None) = quitar expiración; None = no tocar.
         // Se resuelve con CASE para no necesitar SQL dinámico.
         let touch_exp = expires_in_days.is_some();
@@ -261,16 +283,28 @@ impl KeyStore {
         if res.rows_affected() == 0 {
             return Err("key no encontrada".into());
         }
-        self.by_id(id).await.ok_or("key no encontrada".into())
+        if security_changed {
+            self.control
+                .send(ControlEvent::CloseProject(id.to_string()));
+        }
+        match self.by_id(id).await {
+            Ok(Some(k)) => Ok(k),
+            Ok(None) => Err("key no encontrada".into()),
+            Err(e) => {
+                tracing::error!("update: error leyendo key {}: {}", id, e);
+                Err("internal error".into())
+            }
+        }
     }
 
-    async fn by_id(&self, id: &str) -> Option<ApiKey> {
-        sqlx::query_as::<_, ApiKeyRow>("SELECT * FROM api_keys WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await
-            .ok()?
-            .map(ApiKey::from)
+    async fn by_id(&self, id: &str) -> Result<Option<ApiKey>, sqlx::Error> {
+        Ok(
+            sqlx::query_as::<_, ApiKeyRow>("SELECT * FROM api_keys WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?
+                .map(ApiKey::from),
+        )
     }
 
     /// Valida key cruda: hash, revocada, expirada.
@@ -293,23 +327,52 @@ impl KeyStore {
         Some(key)
     }
 
-    pub async fn is_token_revoked(&self, jti: &str) -> bool {
-        sqlx::query_as::<_, (String,)>("SELECT jti FROM revoked_tokens WHERE jti = ?")
-            .bind(jti)
-            .fetch_optional(&self.pool)
-            .await
-            .map(|r| r.is_some())
-            .unwrap_or(false)
+    /// Comprueba que el proyecto (key) sigue existiendo, activo y vigente.
+    /// Fail-closed: propaga errores de DB para que el llamante deniegue.
+    pub async fn is_project_active(&self, id: &str) -> Result<bool, sqlx::Error> {
+        let row = sqlx::query_as::<_, (i64, Option<i64>)>(
+            "SELECT revoked, expires_at FROM api_keys WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some((revoked, expires_at)) = row else {
+            return Ok(false);
+        };
+        if revoked != 0 {
+            return Ok(false);
+        }
+        if let Some(exp) = expires_at {
+            if Utc::now().timestamp() > exp {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
-    pub async fn revoke_token(&self, jti: &str, exp: i64) -> bool {
-        sqlx::query("INSERT OR IGNORE INTO revoked_tokens (jti, exp) VALUES (?,?)")
+    /// FAIL-CLOSED: si la DB no responde, el error se propaga y la autenticación
+    /// se deniega (500) en vez de asumir "no revocado".
+    pub async fn is_token_revoked(&self, jti: &str) -> Result<bool, sqlx::Error> {
+        let row = sqlx::query_as::<_, (String,)>("SELECT jti FROM revoked_tokens WHERE jti = ?")
+            .bind(jti)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.is_some())
+    }
+
+    /// Revoca un jti y cierra las conexiones WS que lo usan.
+    pub async fn revoke_token(&self, jti: &str, exp: i64) -> Result<bool, sqlx::Error> {
+        let inserted = sqlx::query("INSERT OR IGNORE INTO revoked_tokens (jti, exp) VALUES (?,?)")
             .bind(jti)
             .bind(exp)
             .execute(&self.pool)
-            .await
-            .map(|r| r.rows_affected() > 0)
-            .unwrap_or(false)
+            .await?
+            .rows_affected()
+            > 0;
+        if inserted {
+            self.control.send(ControlEvent::CloseJti(jti.to_string()));
+        }
+        Ok(inserted)
     }
 }
 

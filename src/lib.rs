@@ -2,9 +2,11 @@ pub mod auth;
 pub mod authz;
 pub mod channel_manager;
 pub mod config;
+pub mod control;
 pub mod db;
 pub mod handlers;
 pub mod keys;
+pub mod limits;
 pub mod middleware;
 pub mod models;
 pub mod websocket;
@@ -82,17 +84,49 @@ pub async fn serve(addr: SocketAddr) {
     let cfg = config::AppConfig::from_env();
     let state = init_state(&cfg).await;
 
+    // Tarea periódica: purga de JTIs revocados expirados y entradas viejas del limiter.
+    spawn_cleanup_task(state.clone());
+
     serve_with_config(addr, state, &cfg.allowed_origins).await
+}
+
+/// Limpieza periódica en segundo plano (no bloquea el arranque).
+fn spawn_cleanup_task(state: AppState) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(
+            limits::CLEANUP_INTERVAL_SECS,
+        ));
+        loop {
+            tick.tick().await;
+            let now = chrono::Utc::now().timestamp();
+            match sqlx::query("DELETE FROM revoked_tokens WHERE exp < ?")
+                .bind(now)
+                .execute(&state.keys.pool)
+                .await
+            {
+                Ok(r) if r.rows_affected() > 0 => {
+                    tracing::debug!("cleanup: {} jti expirados purgados", r.rows_affected());
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("cleanup revoked_tokens: {}", e),
+            }
+            state.limiter.cleanup();
+            state.registry.cleanup();
+        }
+    });
 }
 
 /// Construye el AppState completo (pool DB + bootstrap dev) a partir de la config.
 /// Reutilizado por el binario y por los tests de integración (DB temporal aislada).
 pub async fn init_state(cfg: &config::AppConfig) -> handlers::AppState {
     let pool = db::init_pool(&cfg.database_url).await.expect("DB init");
-    let keys = keys::KeyStore::new(pool);
+    let control = control::ControlBus::new();
+    let keys = keys::KeyStore::new_with_control(pool, control.clone());
 
     // Bootstrap dev: si no hay keys y está permitido, crea una inicial y la loguea UNA vez.
-    if cfg.allow_bootstrap && keys.count().await == 0 {
+    // FAIL-CLOSED: si no se puede contar, NO se crea bootstrap.
+    let empty = matches!(keys.count().await, Ok(0));
+    if cfg.allow_bootstrap && empty {
         match keys
             .create(
                 "bootstrap-dev".into(),
@@ -119,6 +153,8 @@ pub async fn init_state(cfg: &config::AppConfig) -> handlers::AppState {
         jwt_ttl_secs: cfg.jwt_ttl_secs,
         master_key: cfg.master_key.clone(),
         limiter: middleware::RateLimiter::new(),
+        control,
+        registry: limits::ConnectionRegistry::new(),
     };
 
     // Restaurar canales persistidos (conservan sus IDs: los JWT siguen valiendo).
@@ -144,8 +180,36 @@ pub async fn start_test_server(state: AppState, allowed_origins: &[String]) -> S
 }
 
 pub async fn serve_with_config(addr: SocketAddr, state: AppState, allowed_origins: &[String]) {
-    let app = build_router(state, allowed_origins);
+    let app = build_router(state.clone(), allowed_origins);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     tracing::info!("Socket-Core seguro en http://{}", addr);
-    axum::serve(listener, app).await.unwrap();
+
+    let shutdown_bus = state.control.clone();
+    let shutdown = async move {
+        shutdown_signal().await;
+        tracing::info!("apagado ordenado: cerrando WebSockets");
+        shutdown_bus.send(control::ControlEvent::Shutdown);
+        // Pequeña ventana para que los WS reciban el cierre limpio.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    };
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
+        .unwrap();
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = sigterm.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }

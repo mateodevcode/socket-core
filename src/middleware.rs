@@ -25,6 +25,14 @@ impl RateLimiter {
         }
     }
 
+    /// Purga entradas viejas (llamada por la tarea periódica de limpieza).
+    pub fn cleanup(&self) {
+        let now = Instant::now();
+        self.hits.retain(|_, (_, last)| {
+            now.duration_since(*last) <= Duration::from_secs(crate::limits::RATE_LIMITER_TTL_SECS)
+        });
+    }
+
     /// Devuelve true si aún está dentro del límite.
     pub fn check(&self, bucket: &str, limit_per_min: i64) -> bool {
         if limit_per_min <= 0 {
@@ -149,8 +157,17 @@ pub async fn require_jwt(
 
     let claims = decode_jwt(&state.jwt_secret, &token)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "jwt inválido o expirado".into()))?;
-    if state.keys.is_token_revoked(&claims.jti).await {
-        return Err((StatusCode::UNAUTHORIZED, "token revocado".into()));
+    // FAIL-CLOSED: si no se puede comprobar la revocación, se deniega (500) y se loguea.
+    match state.keys.is_token_revoked(&claims.jti).await {
+        Ok(true) => return Err((StatusCode::UNAUTHORIZED, "token revocado".into())),
+        Ok(false) => {}
+        Err(e) => {
+            tracing::error!("no se pudo comprobar revocación del jti: {}", e);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "no se pudo verificar la credencial".into(),
+            ));
+        }
     }
     Ok(claims)
 }

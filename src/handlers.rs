@@ -3,6 +3,8 @@ use crate::authz::{
     authorize_channel_for_jwt, authorize_channel_for_key, AuthzError, ChannelAction,
 };
 use crate::channel_manager::ChannelManager;
+use crate::control::{ControlBus, ControlEvent};
+use crate::limits::ConnectionRegistry;
 use crate::middleware::{client_ip, require_api_key, require_jwt, require_master, RateLimiter};
 use crate::models::*;
 use axum::{
@@ -22,6 +24,8 @@ pub struct AppState {
     pub jwt_ttl_secs: i64,
     pub master_key: String,
     pub limiter: RateLimiter,
+    pub control: ControlBus,
+    pub registry: ConnectionRegistry,
 }
 
 pub async fn health() -> impl IntoResponse {
@@ -161,6 +165,10 @@ pub async fn delete_channel(
             .bind(&target_id)
             .execute(&state.keys.pool)
             .await;
+        // Cierra explícitamente las conexiones suscritas a este canal.
+        state
+            .control
+            .send(ControlEvent::CloseChannel(target_id.clone()));
         Json(ApiResponse::ok(json!({"deleted": true}))).into_response()
     } else {
         err(StatusCode::NOT_FOUND, "Channel not found")
@@ -296,7 +304,13 @@ pub async fn admin_list_keys(
     if let Err((c, m)) = require_master(&headers, &state.master_key) {
         return err(c, m);
     }
-    let keys = state.keys.list().await;
+    let keys = match state.keys.list().await {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::error!("admin_list_keys: {}", e);
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+        }
+    };
     let pub_keys: Vec<ApiKeyPublic> = keys
         .into_iter()
         .map(|k| ApiKeyPublic {
@@ -366,10 +380,13 @@ pub async fn admin_revoke_key(
     if let Err((c, m)) = require_master(&headers, &state.master_key) {
         return err(c, m);
     }
-    if state.keys.revoke(&id).await {
-        Json(ApiResponse::ok(json!({"revoked": true}))).into_response()
-    } else {
-        err(StatusCode::NOT_FOUND, "key no encontrada")
+    match state.keys.revoke(&id).await {
+        Ok(true) => Json(ApiResponse::ok(json!({"revoked": true}))).into_response(),
+        Ok(false) => err(StatusCode::NOT_FOUND, "key no encontrada"),
+        Err(e) => {
+            tracing::error!("admin_revoke_key: {}", e);
+            err(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
     }
 }
 
@@ -408,10 +425,10 @@ pub async fn admin_update_key(
         }))
         .into_response(),
         Err(e) => {
-            let code = if e == "key no encontrada" {
-                StatusCode::NOT_FOUND
-            } else {
-                StatusCode::BAD_REQUEST
+            let code = match e.as_str() {
+                "key no encontrada" => StatusCode::NOT_FOUND,
+                "internal error" => StatusCode::INTERNAL_SERVER_ERROR,
+                _ => StatusCode::BAD_REQUEST,
             };
             err(code, e)
         }
@@ -426,10 +443,13 @@ pub async fn admin_delete_key(
     if let Err((c, m)) = require_master(&headers, &state.master_key) {
         return err(c, m);
     }
-    if state.keys.delete(&id).await {
-        Json(ApiResponse::ok(json!({"deleted": true}))).into_response()
-    } else {
-        err(StatusCode::NOT_FOUND, "key no encontrada")
+    match state.keys.delete(&id).await {
+        Ok(true) => Json(ApiResponse::ok(json!({"deleted": true}))).into_response(),
+        Ok(false) => err(StatusCode::NOT_FOUND, "key no encontrada"),
+        Err(e) => {
+            tracing::error!("admin_delete_key: {}", e);
+            err(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
     }
 }
 
@@ -457,8 +477,13 @@ pub async fn admin_revoke_token(
     };
     // exp aproximada: ahora + ttl (la limpieza la purga después)
     let exp = chrono::Utc::now().timestamp() + state.jwt_ttl_secs;
-    state.keys.revoke_token(&jti, exp).await;
-    Json(ApiResponse::ok(json!({"revoked": true, "jti": jti}))).into_response()
+    match state.keys.revoke_token(&jti, exp).await {
+        Ok(_) => Json(ApiResponse::ok(json!({"revoked": true, "jti": jti}))).into_response(),
+        Err(e) => {
+            tracing::error!("admin_revoke_token: {}", e);
+            err(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
+    }
 }
 
 fn err(code: StatusCode, msg: impl Into<String>) -> axum::response::Response {

@@ -1,22 +1,44 @@
 use crate::authz::{authorize_channel_for_jwt, AuthzError, ChannelAction};
+use crate::control::ControlEvent;
 use crate::handlers::AppState;
+use crate::limits::{
+    ConnectionRegistry, PublishWindow, WS_AUTH_RECHECK_SECS, WS_HANDSHAKE_TIMEOUT_SECS,
+    WS_IDLE_TIMEOUT_SECS, WS_MAX_MESSAGE_BYTES, WS_PING_INTERVAL_SECS,
+};
+use crate::middleware::client_ip;
 use crate::models::{validate_outbound, ClientType, Event, MAX_PAYLOAD_BYTES, SYSTEM_SOURCE};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Query, State,
     },
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
+use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
+use std::time::{Duration, Instant};
+use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Deserialize)]
 pub struct WsParams {
     pub token: Option<String>,
+}
+
+/// Libera el slot del registro al caer la conexión (incluye salidas tempranas).
+struct ConnGuard {
+    registry: ConnectionRegistry,
+    project_id: String,
+    ip: String,
+}
+
+impl Drop for ConnGuard {
+    fn drop(&mut self) {
+        self.registry.unregister(&self.project_id, &self.ip);
+    }
 }
 
 pub async fn websocket_handler(
@@ -26,20 +48,61 @@ pub async fn websocket_handler(
     Query(params): Query<WsParams>,
 ) -> impl IntoResponse {
     // Gate previo: exige JWT ANTES del upgrade para no malgastar recursos.
-    // Con la API key cruda como token require_jwt ya devuelve 401 (sin puentes).
-    match crate::middleware::require_jwt(&state, &headers, params.token.as_deref()).await {
-        Ok(claims) => {
-            info!(
-                "WS pre-auth ok project={} sub={}",
-                claims.project_name, claims.sub
+    let claims =
+        match crate::middleware::require_jwt(&state, &headers, params.token.as_deref()).await {
+            Ok(c) => c,
+            Err((code, msg)) => {
+                warn!("WS rechazado: {} ({})", msg, code);
+                return (code, msg).into_response();
+            }
+        };
+
+    // El proyecto debe seguir existiendo, activo y vigente (fail-closed).
+    match state.keys.is_project_active(&claims.project_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            warn!(
+                "WS rechazado: proyecto {} inactivo/revocado",
+                claims.project_id
             );
-            ws.on_upgrade(move |socket| handle_socket(socket, state, claims))
+            return (StatusCode::UNAUTHORIZED, "credential invalid or revoked").into_response();
         }
-        Err((code, msg)) => {
-            warn!("WS rechazado: {} ({})", msg, code);
-            (code, msg).into_response()
+        Err(e) => {
+            error!(
+                "WS: no se pudo comprobar el proyecto {}: {}",
+                claims.project_id, e
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "no se pudo verificar la credencial",
+            )
+                .into_response();
         }
     }
+
+    // Límite de conexiones por proyecto y por IP (slot reservado antes del upgrade).
+    let ip = client_ip(&headers);
+    if !state.registry.try_register(&claims.project_id, &ip) {
+        warn!(
+            "WS rechazado por límite de conexiones (proyecto {} ip {})",
+            claims.project_id, ip
+        );
+        return (StatusCode::TOO_MANY_REQUESTS, "too many connections").into_response();
+    }
+    let guard = ConnGuard {
+        registry: state.registry.clone(),
+        project_id: claims.project_id.clone(),
+        ip,
+    };
+
+    info!(
+        "WS pre-auth ok project={} sub={}",
+        claims.project_name, claims.sub
+    );
+
+    ws.max_message_size(WS_MAX_MESSAGE_BYTES)
+        .max_frame_size(WS_MAX_MESSAGE_BYTES)
+        .on_upgrade(move |socket| handle_socket(socket, state, claims, guard))
 }
 
 /// Sanea un nombre de dispositivo opcional: trim, máx 64 caracteres, sin controles.
@@ -56,22 +119,48 @@ fn sanitize_device(raw: Option<&str>) -> Option<String> {
     }
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState, claims: crate::auth::Claims) {
-    let (mut sender, mut receiver) = socket.split();
+async fn close_with(sender: &mut SplitSink<WebSocket, Message>, code: &str, detail: &str) {
+    let _ = sender
+        .send(Message::Text(
+            json!({"type": "error", "code": code, "detail": detail}).to_string(),
+        ))
+        .await;
+    let _ = sender.send(Message::Close(None)).await;
+}
 
-    // Handshake: { "channel": "<id o nombre>", "device": "<opcional>" }.
+async fn handle_socket(
+    socket: WebSocket,
+    state: AppState,
+    claims: crate::auth::Claims,
+    _guard: ConnGuard,
+) {
+    let (mut sender, mut receiver) = socket.split();
+    let mut control_rx = state.control.subscribe();
+
+    // Handshake con timeout: { "channel": "<id o nombre>", "device": "<opcional>" }.
     // La identidad NO la declara el cliente: es el `sub` del JWT.
-    let (channel_ref, device) = match receiver.next().await {
-        Some(Ok(msg)) => {
+    let first = tokio::time::timeout(
+        Duration::from_secs(WS_HANDSHAKE_TIMEOUT_SECS),
+        receiver.next(),
+    )
+    .await;
+    let (channel_ref, device) = match first {
+        Err(_) => {
+            warn!("WS sub={} sin handshake a tiempo", claims.sub);
+            close_with(&mut sender, "handshake_timeout", "envía {channel} a tiempo").await;
+            return;
+        }
+        Ok(None) | Ok(Some(Err(_))) => return,
+        Ok(Some(Ok(Message::Close(_)))) => return,
+        Ok(Some(Ok(msg))) => {
             let Some(text) = msg.to_text().ok() else {
+                close_with(&mut sender, "invalid_payload", "se esperaba texto JSON").await;
                 return;
             };
             let obj: serde_json::Value = match serde_json::from_str(text) {
                 Ok(v) => v,
                 Err(_) => {
-                    let _ = sender
-                        .send(Message::Text(json!({"error": "Invalid JSON"}).to_string()))
-                        .await;
+                    close_with(&mut sender, "invalid_payload", "JSON inválido").await;
                     return;
                 }
             };
@@ -81,16 +170,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: crate::auth::
                     sanitize_device(obj.get("device").and_then(|v| v.as_str())),
                 ),
                 _ => {
-                    let _ = sender
-                        .send(Message::Text(
-                            json!({"error": "falta el canal en el handshake"}).to_string(),
-                        ))
-                        .await;
+                    close_with(&mut sender, "invalid_payload", "falta el canal").await;
                     return;
                 }
             }
         }
-        _ => return,
     };
 
     // Autorización central única (proyecto dueño + rol subscribe + cobertura del claim).
@@ -105,11 +189,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: crate::auth::
     {
         Ok(id) => id,
         Err(AuthzError::NotFound) => {
-            let _ = sender
-                .send(Message::Text(
-                    json!({"error": "Channel not found"}).to_string(),
-                ))
-                .await;
+            close_with(&mut sender, "not_found", "canal no encontrado").await;
             return;
         }
         Err(e) => {
@@ -117,11 +197,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: crate::auth::
                 "WS sub={} denegado en canal {} ({:?})",
                 claims.sub, channel_ref, e
             );
-            let _ = sender
-                .send(Message::Text(
-                    json!({"error": "forbidden para este canal"}).to_string(),
-                ))
-                .await;
+            close_with(&mut sender, "forbidden", "sin acceso a este canal").await;
             return;
         }
     };
@@ -134,15 +210,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: crate::auth::
         &effective_id,
         user_id.clone(),
         connection_id.clone(),
-        device.clone(),
+        device,
         ClientType::WebSocket,
         claims.project_name.clone(),
     ) {
         Ok(tx) => tx,
-        Err(e) => {
-            let _ = sender
-                .send(Message::Text(json!({"error": e}).to_string()))
-                .await;
+        Err(_) => {
+            close_with(&mut sender, "not_found", "canal no encontrado").await;
             return;
         }
     };
@@ -153,7 +227,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: crate::auth::
     );
     let mut rx = tx.subscribe();
 
-    // Presencia inicial: solo dentro del canal/proyecto (no se expone fuera).
+    // Presencia inicial: solo dentro del canal/proyecto.
     if let Some(clients) = state.channel_manager.get_clients(&effective_id) {
         let join_event = Event::new(
             effective_id.clone(),
@@ -170,21 +244,92 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: crate::auth::
         let _ = tx.send(join_event);
     }
 
-    // Si el JWT expira a mitad de conexión, la cortamos (re-autenticación periódica).
     let jwt_exp = claims.exp;
 
+    // Vigilantes periódicos de la conexión.
+    let mut auth_tick = tokio::time::interval(Duration::from_secs(WS_AUTH_RECHECK_SECS));
+    auth_tick.tick().await; // consume el tick inmediato
+    let mut ping_tick = tokio::time::interval(Duration::from_secs(WS_PING_INTERVAL_SECS));
+    ping_tick.tick().await;
+    let mut last_inbound = Instant::now();
+    let mut publish_window = PublishWindow::new();
+
     loop {
-        // Timeout hasta expiración del JWT para forzar re-auth
         let now = chrono::Utc::now().timestamp();
         let secs_left = (jwt_exp - now).max(0) as u64;
-        let timeout_dur = std::time::Duration::from_secs(secs_left.min(3600));
+        let timeout_dur = Duration::from_secs(secs_left.min(3600));
 
         tokio::select! {
+            // 1) Órdenes internas (revocación/borrado/apagado).
+            ctrl = control_rx.recv() => {
+                match ctrl {
+                    Ok(ControlEvent::CloseProject(pid)) if pid == claims.project_id => {
+                        info!("cerrando WS de proyecto revocado/borrado: {}", pid);
+                        close_with(&mut sender, "credential_revoked", "credencial revocada").await;
+                        break;
+                    }
+                    Ok(ControlEvent::CloseJti(jti)) if jti == claims.jti => {
+                        info!("cerrando WS de jti revocado: {}", jti);
+                        close_with(&mut sender, "token_revoked", "token revocado").await;
+                        break;
+                    }
+                    Ok(ControlEvent::CloseChannel(cid)) if cid == effective_id => {
+                        info!("cerrando WS de canal borrado: {}", cid);
+                        close_with(&mut sender, "channel_deleted", "canal borrado").await;
+                        break;
+                    }
+                    Ok(ControlEvent::Shutdown) => {
+                        info!("apagado del servidor: cerrando WS {}", connection_id);
+                        close_with(&mut sender, "server_shutdown", "servidor apagándose").await;
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(RecvError::Lagged(_)) => {
+                        // El bus no puede perder órdenes críticas: revalida por watchdog.
+                    }
+                    Err(RecvError::Closed) => {}
+                }
+            }
+
+            // 2) Revalidación periódica de credenciales (fail-closed).
+            _ = auth_tick.tick() => {
+                let still_ok = match state.keys.is_token_revoked(&claims.jti).await {
+                    Ok(false) => authorize_channel_for_jwt(
+                        &state.channel_manager,
+                        &state.keys.pool,
+                        &claims,
+                        &effective_id,
+                        ChannelAction::Subscribe,
+                    )
+                    .await
+                    .is_ok(),
+                    _ => false, // revocado o DB caída => denegar
+                };
+                if !still_ok {
+                    info!("WS {} sin credenciales válidas en revalidación", connection_id);
+                    close_with(&mut sender, "credential_revoked", "credencial ya no es válida").await;
+                    break;
+                }
+            }
+
+            // 3) Ping/pong e idle timeout.
+            _ = ping_tick.tick() => {
+                if last_inbound.elapsed() > Duration::from_secs(WS_IDLE_TIMEOUT_SECS) {
+                    info!("WS {} inactivo demasiado tiempo", connection_id);
+                    close_with(&mut sender, "idle_timeout", "sin actividad").await;
+                    break;
+                }
+                if sender.send(Message::Ping(Vec::new())).await.is_err() {
+                    break;
+                }
+            }
+
+            // 4) Eventos del canal.
             result = rx.recv() => {
                 match result {
                     Ok(event) => {
-                        // Los targets se refieren a USUARIOS (sub), nunca a un id declarado.
-                        let should_receive = event.targets.iter().any(|t| t == "*" || t == &user_id);
+                        let should_receive =
+                            event.targets.iter().any(|t| t == "*" || t == &user_id);
                         if should_receive {
                             if let Ok(json_str) = serde_json::to_string(&event) {
                                 if let Err(e) = sender.send(Message::Text(json_str)).await {
@@ -193,25 +338,38 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: crate::auth::
                                 }
                             }
                         } else {
-                            debug!("Event for {:?} received but not for user {}", event.targets, user_id);
+                            debug!("Event for {:?} not for user {}", event.targets, user_id);
                         }
                     }
-                    Err(_) => { debug!("Channel broadcast closed"); break; }
+                    Err(RecvError::Lagged(n)) => {
+                        // Cliente lento: avisar en vez de cerrar en silencio.
+                        warn!("WS {} lagged: {} eventos perdidos", connection_id, n);
+                        let _ = sender
+                            .send(Message::Text(
+                                json!({"type": "missed_events", "missed": n}).to_string(),
+                            ))
+                            .await;
+                    }
+                    Err(RecvError::Closed) => {
+                        debug!("Channel broadcast closed");
+                        break;
+                    }
                 }
             }
+
+            // 5) Mensajes del cliente.
             msg = receiver.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        // Tope de frame/payload (64 KB). Cierra la conexión si lo supera.
+                        last_inbound = Instant::now();
                         if text.len() > MAX_PAYLOAD_BYTES {
-                            let _ = sender
-                                .send(Message::Text(
-                                    json!({"type": "error", "code": "message_too_large"}).to_string(),
-                                ))
-                                .await;
+                            close_with(&mut sender, "message_too_large", "máximo 64 KB").await;
                             break;
                         }
-                        // Solo roles publish pueden emitir por WS.
+                        if !publish_window.allow() {
+                            close_with(&mut sender, "rate_limited", "demasiadas publicaciones por segundo").await;
+                            break;
+                        }
                         if !claims.can_publish() {
                             let _ = sender
                                 .send(Message::Text(
@@ -220,8 +378,6 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: crate::auth::
                                 .await;
                             continue;
                         }
-                        // Re-verificación de autorización en cada publicación (por si la
-                        // key se revocó/eliminó mientras la conexión seguía abierta).
                         if authorize_channel_for_jwt(
                             &state.channel_manager,
                             &state.keys.pool,
@@ -232,11 +388,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: crate::auth::
                         .await
                         .is_err()
                         {
-                            let _ = sender
-                                .send(Message::Text(
-                                    json!({"type": "error", "code": "forbidden", "detail": "credencial sin acceso al canal"}).to_string(),
-                                ))
-                                .await;
+                            close_with(&mut sender, "credential_revoked", "credencial sin acceso al canal").await;
                             break;
                         }
                         let payload: serde_json::Value = match serde_json::from_str(&text) {
@@ -250,13 +402,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: crate::auth::
                                 continue;
                             }
                         };
-                        // Targets opcionales del payload (a usuarios); por defecto "*".
                         let mut targets = vec!["*".to_string()];
                         if let Some(arr) = payload.get("targets").and_then(|v| v.as_array()) {
-                            let parsed: Option<Vec<String>> = arr
-                                .iter()
-                                .map(|v| v.as_str().map(|s| s.to_string()))
-                                .collect();
+                            let parsed: Option<Vec<String>> =
+                                arr.iter().map(|v| v.as_str().map(|s| s.to_string())).collect();
                             if let Some(t) = parsed {
                                 targets = t;
                             } else {
@@ -283,24 +432,37 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: crate::auth::
                             error!("Error emitiendo evento: {}", e);
                         }
                     }
+                    Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {
+                        last_inbound = Instant::now();
+                    }
+                    Some(Ok(Message::Binary(_))) => {
+                        last_inbound = Instant::now();
+                        let _ = sender
+                            .send(Message::Text(
+                                json!({"type": "error", "code": "invalid_payload", "detail": "solo texto JSON"}).to_string(),
+                            ))
+                            .await;
+                    }
                     Some(Ok(Message::Close(_))) | None => {
                         info!("Client {} (conn {}) disconnected", user_id, connection_id);
                         break;
                     }
                     Some(Err(e)) => {
-                        error!("WebSocket error: {}", e);
+                        debug!("WebSocket error en {}: {}", connection_id, e);
                         break;
                     }
-                    _ => {}
                 }
             }
-            _ = tokio::time::sleep(timeout_dur), if jwt_exp != i64::MAX => {
+
+            // 6) Expiración del JWT a mitad de conexión.
+            _ = tokio::time::sleep(timeout_dur) => {
                 info!("JWT expirado para {}, cerrando WS (re-auth requerida)", user_id);
-                let _ = sender.send(Message::Text(json!({"type": "error", "code": "token_expired", "detail": "reconecta con un token nuevo"}).to_string())).await;
+                close_with(&mut sender, "token_expired", "reconecta con un token nuevo").await;
                 break;
             }
         }
     }
+
     state
         .channel_manager
         .unsubscribe(&effective_id, &connection_id);

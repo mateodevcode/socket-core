@@ -79,6 +79,8 @@ impl Hub {
             jwt_ttl_secs: 600,
             master_key: MASTER_KEY.into(),
             limiter: RateLimiter::new(),
+            control: socket_core::control::ControlBus::new(),
+            registry: socket_core::limits::ConnectionRegistry::new(),
         };
 
         let addr = socket_core::start_test_server(state.clone(), &[]).await;
@@ -267,7 +269,9 @@ impl Hub {
         match tokio::time::timeout(Duration::from_secs(3), stream.next()).await {
             Ok(Some(Ok(Message::Text(t)))) => {
                 let v: Value = serde_json::from_str(&t).map_err(|_| 1u16)?;
-                if v.get("error").is_some() {
+                let es_error = v.get("error").is_some()
+                    || v.get("type").and_then(|x| x.as_str()) == Some("error");
+                if es_error {
                     Err(1)
                 } else {
                     Ok(stream)
@@ -323,6 +327,8 @@ pub fn expired_jwt(hub: &Hub, sub: &str, channel: &str, role: &str) -> String {
         channel: channel.into(),
         role: role.into(),
         jti: uuid::Uuid::new_v4().to_string(),
+        iss: socket_core::auth::JWT_ISSUER.to_string(),
+        aud: socket_core::auth::JWT_AUDIENCE.to_string(),
         iat: chrono::Utc::now().timestamp() - 7200,
         exp: chrono::Utc::now().timestamp() - 3600, // 1h expirado
     };
