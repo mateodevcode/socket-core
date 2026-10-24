@@ -36,6 +36,7 @@
 
     <script type="module">
       import { connect, tokenFromEndpoint } from "/sdk/socket-core.mjs";
+      import { createPresenceTracker } from "/presence.mjs";
 
       const estado = document.getElementById("estado");
       const fatal = document.getElementById("fatal");
@@ -110,20 +111,20 @@
         sc.on("fatal", (f) => {
           fatal.textContent = `conexión terminada: ${f.code} — ${f.detail || ""}`;
         });
-        // Un usuario puede tener VARIAS conexiones (renovación con solape): contamos
-        // por usuario para no marcarlo "desconectado" si su conexión nueva sigue viva.
-        const porUsuario = new Map();
+        // Presencia por Set de connection_id (sembrada por /presence): la
+        // renovación con solape no debe marcar al usuario como desconectado.
+        const presencia = createPresenceTracker();
+        fetch("/presence")
+          .then((r) => (r.ok ? r.json() : { connections: [] }))
+          .then((j) => presencia.seed(j.connections))
+          .catch(() => {});
         sc.on("presence", (p) => {
-          const actual = porUsuario.get(p.user) || 0;
-          const siguiente = actual + (p.type === "client_joined" ? 1 : -1);
-          if (siguiente <= 0) {
-            porUsuario.delete(p.user);
-            add("sys", `${p.user} se ha desconectado (total ${p.total_clients})`);
-          } else {
-            porUsuario.set(p.user, siguiente);
-            if (p.type === "client_joined") {
-              add("sys", `${p.user} conectado (${siguiente} conexión/es)`);
-            }
+          const estado = presencia.apply(p);
+          if (!estado.user) return;
+          if (!estado.online) {
+            add("sys", `${estado.user} se ha desconectado (total ${p.total_clients})`);
+          } else if (p.type === "client_joined") {
+            add("sys", `${estado.user} conectado (${estado.connections} conexión/es)`);
           }
         });
         sc.on("missed_events", (m) => {

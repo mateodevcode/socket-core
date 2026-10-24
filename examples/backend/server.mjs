@@ -54,6 +54,26 @@ app.get("/me", (req, res) => {
   res.json({ user });
 });
 
+app.get("/presence", async (req, res) => {
+  const user = sessionUser(req);
+  if (!user) return res.status(401).json({ error: "no has iniciado sesión" });
+  try {
+    const r = await fetch(`${HUB}/channels/${encodeURIComponent(CHANNEL)}/clients`, {
+      headers: { "x-api-key": API_KEY },
+    });
+    if (!r.ok) return res.status(502).json({ error: "presence_unavailable" });
+    const j = await r.json();
+    // Solo lo mínimo: identidad opaca + conexión (sin device ni metadatos).
+    const connections = (j.data || []).map((c) => ({
+      user: c.id,
+      connection_id: c.connection_id,
+    }));
+    res.json({ connections });
+  } catch {
+    res.status(502).json({ error: "presence_unavailable" });
+  }
+});
+
 app.post("/socket-token", async (req, res) => {
   const user = sessionUser(req);
   if (!user) return res.status(401).json({ error: "no has iniciado sesión" });

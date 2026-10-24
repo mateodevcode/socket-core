@@ -699,3 +699,27 @@ test("tokenFromEndpoint 503 => backoff y reintenta", { timeout: 25000 }, async (
     await hub.cleanup();
   }
 });
+
+// ---------- S6: presencia por connection_id (solape de renovación) ----------
+
+test("presencia por Set de connection_id: el solape no marca offline", async () => {
+  const { createPresenceTracker } = await import("../../../examples/frontend/presence.mjs");
+  const t = createPresenceTracker();
+  t.seed([
+    { user: "u1", connection_id: "old" },
+    { user: "u2", connection_id: "ux" },
+  ]);
+  assert.equal(t.count("u1"), 1);
+  // Renovación: entra la conexión nueva y luego se va la vieja.
+  let r = t.apply({ type: "client_joined", user: "u1", connection_id: "new" });
+  assert.equal(r.online, true);
+  assert.equal(r.connections, 2);
+  r = t.apply({ type: "client_left", user: "u1", connection_id: "old" });
+  assert.equal(r.online, true, "sigue online: queda la conexión nueva");
+  assert.equal(r.connections, 1);
+  assert.equal(t.count("u2"), 1, "otros usuarios no se tocan");
+  // Ahora sí se va la última.
+  r = t.apply({ type: "client_left", user: "u1", connection_id: "new" });
+  assert.equal(r.online, false);
+  assert.equal(t.count("u1"), 0);
+});

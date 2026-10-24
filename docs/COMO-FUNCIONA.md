@@ -220,8 +220,10 @@ eventos por `id`. Si el servidor cierra por expiración, el código es
 
 Durante el solape hay **dos conexiones del mismo usuario**: el `client_left` de la
 vieja puede llegar cuando la nueva ya está activa. En la UI hay que **contar
-conexiones por usuario** (el chat de `examples/` lo hace) para no marcar al usuario
-como desconectado si aún le queda una.
+conexiones por usuario con un Set de `connection_id`** y **sembrar la foto inicial**
+con `GET /channels/:id/clients` vía el backend del proyecto (el ejemplo expone
+`GET /presence` y usa `examples/frontend/presence.mjs`). Un usuario solo se marca
+desconectado cuando su Set queda vacío.
 
 Ejecución real con un hub de TTL=60 s para forzar la renovación en segundos
 (producción usa 600 s):
