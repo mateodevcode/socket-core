@@ -5,6 +5,18 @@ services:
       dockerfile: Dockerfile
     container_name: socket-core
     restart: unless-stopped
+    # Endurecimiento: FS de solo lectura, sin capabilities, sin escalada.
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      # SQLite/temp y ficheros efímeros.
+      - /tmp:size=16m,mode=1777
+    pids_limit: 256
+    mem_limit: 256m
+    cpus: "1.0"
     ports:
       # Solo loopback; el acceso externo entra por Nginx con TLS.
       # ADMIN_PORT (3015) NO se publica: el panel admin vive en 127.0.0.1 del
@@ -19,6 +31,8 @@ services:
       - ADMIN_PORT=3015
       - DATABASE_URL=sqlite:/app/data/socket-core.db?mode=rwc
     volumes:
+      # El host debe permitir escritura al UID 10001 del contenedor:
+      #   sudo chown -R 10001:10001 ./data
       - ./data:/app/data
     networks:
       - central_network

@@ -211,6 +211,38 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
   decisiones de seguridad.
 - `sub` debe ser un ID opaco (no email): se muestra al resto del canal.
 
+
+### FASE 6 — Contenedor y CI/CD
+
+#### Cambios
+
+1. **Dockerfile endurecido**: imagen base fijada por versión (`rust:1.97-bookworm`,
+   `debian:bookworm-slim`), usuario sin privilegios **UID/GID 10001** (sin shell),
+   `HEALTHCHECK` propio contra `/health` y sin paquetes innecesarios.
+
+2. **docker-compose**: `read_only: true`, `cap_drop: [ALL]`,
+   `no-new-privileges:true`, `tmpfs /tmp`, límites de memoria (256 MB), CPU (1.0) y
+   `pids_limit`. El listener admin sigue sin publicarse.
+
+3. **CI** (`.github/workflows/ci.yml`) en PR y push: `cargo fmt --check`,
+   `cargo clippy --all-targets -- -D warnings`, `cargo test --all-targets` y
+   `cargo audit`. Actions fijadas por versión (`checkout@v4`,
+   `rust-toolchain@1.97.0`, `rust-cache@v2`, `install-action@v2`).
+
+4. **Deploy dependiente de CI**: `deploy.yml` ahora usa `workflow_run` sobre el
+   workflow `CI` para `main` y solo despliega si la conclusión es `success`.
+
+5. **SECURITY.md**: pasos manuales de GitHub (repo privado, 2FA, branch protection
+   con el check de CI, permisos de Actions, secret scanning, Dependabot), rotación
+   de secretos, backups y permisos del volumen.
+
+#### Operación (obligatorio tras desplegar)
+
+- El host debe permitir escritura al UID 10001 en `./data`:
+  `sudo chown -R 10001:10001 data` (el workflow de deploy ya lo hace).
+- El contenedor es de solo lectura: escribe únicamente en `/app/data` y `/tmp`.
+- `ci.yml` debe ser el check requerido en la protección de `main`.
+
 ### Nota de estado
 
 - La suite de integración en `tests/` define el comportamiento objetivo: los

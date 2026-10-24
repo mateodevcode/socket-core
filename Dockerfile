@@ -1,21 +1,37 @@
 # ============================================
-# socket-core (build multi-stage)
+# socket-core — imagen multi-stage, no root
 # ============================================
-FROM rust:1-bookworm AS builder
+FROM rust:1.97-bookworm AS builder
 WORKDIR /app
-RUN apt-get update && apt-get install -y pkg-config libsqlite3-dev \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs && cargo build --release || true
+# Cache de dependencias con un src vacío
+RUN mkdir src && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs \
+    && cargo build --release || true
 RUN rm -rf src
 COPY src ./src
 RUN cargo build --release
 
 FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates libsqlite3-0 curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 app \
+    && useradd --system --uid 10001 --gid app --home-dir /app --shell /usr/sbin/nologin app
 WORKDIR /app
-RUN apt-get update && apt-get install -y ca-certificates libsqlite3-0 curl \
-    && rm -rf /var/lib/apt/lists/*
-RUN mkdir -p /app/data
-COPY --from=builder /app/target/release/socket-core /app/socket-core
+RUN mkdir -p /app/data && chown -R app:app /app
+COPY --from=builder --chown=app:app /app/target/release/socket-core /app/socket-core
+
+# Usuario sin privilegios y sin shell.
+USER app
+
 EXPOSE 3005
+# El listener admin (ADMIN_PORT, 3015) escucha en 127.0.0.1 dentro del contenedor:
+# no se expone y no es alcanzable desde otros contenedores.
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:3005/health || exit 1
+
 CMD ["./socket-core"]

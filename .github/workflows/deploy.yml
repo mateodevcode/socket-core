@@ -2,11 +2,18 @@
 name: Deploy Socket-Core
 
 on:
-  push:
+  # El deploy SOLO se dispara cuando CI termina con éxito sobre main.
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
     branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -42,6 +49,9 @@ jobs:
             cp -r /tmp/socket-core-data.bak/. data/ 2>/dev/null || true
             rm -f /tmp/socket-core.env.bak
             rm -rf /tmp/socket-core-data.bak
+
+            echo "→ Permisos del volumen para el usuario no-root del contenedor (UID 10001)..."
+            sudo chown -R 10001:10001 data
 
             echo "→ Actualizando código desde GitHub..."
             git fetch origin main
