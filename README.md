@@ -412,6 +412,12 @@ Desde el WS también se emite escribiendo el JSON del payload (requiere rol `pub
 - El WS se corta al expirar el JWT: **siempre** implementa pedir-token + reconectar.
 - `curl` no habla `wss://`: para probar el handshake usa `https://.../ws` con headers `Upgrade` (ver §3 paso 6).
 
+## 5.5 SDK, ejemplo y códigos de error
+
+- **SDK JS** (un fichero, sin dependencias): [`sdk/js/README.md`](sdk/js/README.md).
+- **Ejemplo completo** (backend Express + chat): [`examples/README.md`](examples/README.md).
+- **Códigos de error estables** (WS y HTTP): [`docs/CODIGOS.md`](docs/CODIGOS.md).
+
 ## 6. Operación
 
 - **Backups que importan:** `.env` (secretos) y `data/socket-core.db` (keys + revocaciones). El workflow de deploy los preserva solos en cada despliegue.

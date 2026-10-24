@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>socket-core · chat de ejemplo</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { font-family: system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; }
+      #estado { font-size: .9rem; opacity: .8; }
+      #log { border: 1px solid #8884; border-radius: 8px; padding: .75rem; height: 45vh; overflow-y: auto; }
+      .msg { margin: .25rem 0; }
+      .meta { font-size: .75rem; opacity: .65; }
+      .sys { font-size: .8rem; opacity: .7; font-style: italic; }
+      form { display: flex; gap: .5rem; margin-top: .75rem; }
+      input { flex: 1; padding: .5rem; }
+      button { padding: .5rem .9rem; }
+      #fatal { color: #c62828; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <h1>socket-core · chat de ejemplo</h1>
+    <p id="estado">sin conexión</p>
+    <p id="fatal"></p>
+
+    <form id="login">
+      <input id="nombre" placeholder="Tu nombre (login simulado)" autocomplete="off" />
+      <button>Entrar</button>
+    </form>
+
+    <div id="log" hidden></div>
+    <form id="enviar" hidden>
+      <input id="texto" placeholder="Escribe un mensaje…" autocomplete="off" />
+      <button>Enviar</button>
+    </form>
+
+    <script type="module">
+      import { connect } from "/sdk/socket-core.mjs";
+
+      const estado = document.getElementById("estado");
+      const fatal = document.getElementById("fatal");
+      const log = document.getElementById("log");
+      const loginForm = document.getElementById("login");
+      const enviarForm = document.getElementById("enviar");
+
+      let sc = null;
+      let yo = null;
+
+      function add(cls, text, meta) {
+        const div = document.createElement("div");
+        div.className = cls;
+        div.textContent = text;
+        if (meta) {
+          const m = document.createElement("div");
+          m.className = "meta";
+          m.textContent = meta;
+          div.appendChild(m);
+        }
+        log.appendChild(div);
+        log.scrollTop = log.scrollHeight;
+      }
+
+      loginForm.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const name = document.getElementById("nombre").value.trim();
+        if (!name) return;
+        const r = await fetch("/login", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name }),
+        });
+        const j = await r.json();
+        if (!r.ok) return add("sys", j.error || "error de login");
+        yo = j.user;
+        loginForm.hidden = true;
+        log.hidden = false;
+        enviarForm.hidden = false;
+        conectar();
+      });
+
+      async function conectar() {
+        // El backend del proyecto pide el JWT con la API key (que vive SOLO allí).
+        // El navegador recibe únicamente el JWT de corta vida.
+        const primera = await fetch("/socket-token", { method: "POST" });
+        const inicial = await primera.json();
+        if (!primera.ok) {
+          add("sys", `no se pudo obtener el token: ${inicial.error || primera.status}`);
+          return;
+        }
+        let primerTokenPendiente = true;
+        const tokenProvider = async () => {
+          if (primerTokenPendiente) {
+            primerTokenPendiente = false;
+            return { token: inicial.token, expires_in: inicial.expires_in };
+          }
+          const r = await fetch("/socket-token", { method: "POST" });
+          const j = await r.json();
+          if (!r.ok) throw new Error(j.error || "no se pudo obtener el token");
+          return { token: j.token, expires_in: j.expires_in };
+        };
+
+        sc = connect({
+          url: inicial.url,
+          channel: inicial.channel,
+          device: "web",
+          tokenProvider,
+        });
+
+        sc.on("status", (s) => {
+          estado.textContent = `estado: ${s}`;
+        });
+        sc.on("fatal", (f) => {
+          fatal.textContent = `conexión terminada: ${f.code} — ${f.detail || ""}`;
+        });
+        sc.on("presence", (p) => {
+          add("sys", `${p.type}: ${p.user} (total ${p.total_clients})`);
+        });
+        sc.on("missed_events", (m) => {
+          add("sys", `perdidos ${m.missed} eventos (cliente lento)`);
+        });
+        sc.on("message", (ev) => {
+          const p = ev.payload || {};
+          if (p.type !== "chat") return;
+          const quien = p.from || ev.source;
+          add("msg", `${quien}: ${p.text || ""}`, `id ${ev.id.slice(0, 8)}`);
+        });
+
+      }
+
+      enviarForm.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const input = document.getElementById("texto");
+        const text = input.value.trim();
+        if (!text || !sc) return;
+        try {
+          await sc.publish({ type: "chat", text, from: yo.name });
+          input.value = "";
+        } catch (e) {
+          add("sys", `no se pudo publicar: ${e.message}`);
+        }
+      });
+    </script>
+  </body>
+</html>

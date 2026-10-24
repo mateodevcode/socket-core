@@ -274,6 +274,48 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
   --security-opt no-new-privileges` + volumen: arranca como UID 10001, crea
   `socket-core.db` propio, ambos `/health` OK, `docker stop` en ~1 s. Prueba
   negativa: volumen no escribible ⇒ el entrypoint aborta con instrucciones.
+
+### FASE 7 — Facilidad de uso (SDK, ejemplo, alta de clientes)
+
+#### Nuevo
+
+1. **SDK JavaScript** (`sdk/js/socket-core.mjs`): un solo fichero, sin dependencias,
+   navegador y Node ≥ 18 (cliente WS propio si no hay `WebSocket` global).
+   - `connect({ tokenProvider, channel, device?, url })`; el SDK **nunca** ve la API key.
+   - Reconexión con backoff exponencial **+ jitter** y espera mayor para `rate_limited`.
+   - Renovación **sin cortes** ~60 s antes de expirar: abre otra conexión, espera su
+     handshake y cierra la vieja; deduplica eventos por `id` durante el solape.
+   - Estrategia por código: reconecta en `token_expired`/`server_shutdown`/
+     `idle_timeout`/`handshake_timeout`/red; `fatal` (sin reconectar) en
+     `forbidden`/`credential_revoked`/`token_revoked`/`channel_deleted`/`not_found`
+     (y `invalid_payload`/`message_too_large` como errores de cliente).
+   - `on('message'|'presence'|'missed_events'|'fatal'|'status')`, `publish()` (rechazo
+     local >64 KB y de rol sin `publish`), `close()`, y getter `status`.
+
+2. **Ejemplo completo** (`examples/`): backend Express con login simulado e IDs
+   opacos, `POST /socket-token` (API key solo en servidor) y chat HTML que usa el SDK.
+
+3. **`alta_cliente.py`**: genera un **paquete de credenciales** en fichero con permisos
+   `0600` (la API key ya no se imprime en el terminal), lista los prefijos existentes,
+   explica de forma legible el error de **prefijo solapado**, y propone scopes mínimos
+   (`publish,subscribe`) y dominios reales (avisa si se usa `*`).
+
+4. **`docs/CODIGOS.md`**: contrato estable de códigos WS y HTTP, con causa y acción.
+   Un test (`tests/codigos_doc.rs`) falla si `src/` usa un código no documentado.
+
+#### Cambios de comportamiento de herramientas
+
+- `alta_cliente.py` exige al menos un dominio (no acepta vacío) y no muestra la API
+  key por stdout; el paquete queda en `credenciales-<proyecto>-<fecha>.txt` (0600).
+- `estado.py`/`alta_cliente.py` usan el listener admin por `docker exec` cuando el
+  acceso directo a `127.0.0.1:ADMIN_PORT` no es posible.
+
+#### Nota
+
+- **No se tocó lógica del servidor** en esta fase; los fallos encontrados fueron del
+  propio SDK/test (detección de presencia por `payload.type`, y un helper de test que
+  consumía el body antes de parsearlo).
+
 ### Nota de estado
 
 - La suite de integración en `tests/` define el comportamiento objetivo: los
