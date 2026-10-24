@@ -127,12 +127,54 @@ jobs:
             echo "→ Limpiando imágenes viejas..."
             docker image prune -f
 
-            echo "→ Verificando salud del servicio..."
-            sleep 5
+            # Espera hasta 60 s a que respondan AMBOS listeners (/health en 3005 y 3015).
+            salud_ok() {
+              curl -fsS --max-time 3 http://127.0.0.1:3005/health >/dev/null 2>&1 \
+                && docker exec socket-core curl -fsS --max-time 3 http://127.0.0.1:3015/health >/dev/null 2>&1
+            }
+
+            echo "→ Verificando salud (máx 60 s, ambos listeners)..."
+            OK=0
+            for i in $(seq 1 30); do
+              if salud_ok; then OK=1; break; fi
+              sleep 2
+            done
+
+            if [ "$OK" != "1" ]; then
+              echo "❌ La salud falló tras 60 s. Iniciando ROLLBACK AUTOMÁTICO..."
+              echo "→ Commit previo: $PREV"
+              docker compose logs --tail=120 socket-core || true
+
+              echo "→ Volviendo al commit anterior y restaurando el último backup..."
+              git reset --hard "$PREV"
+              ULTIMO_BACKUP=$(ls -1t "$BACKUP_DIR"/data-*.tgz 2>/dev/null | head -1 || true)
+              if [ -n "$ULTIMO_BACKUP" ]; then
+                echo "   backup: $ULTIMO_BACKUP"
+                sudo rm -rf data
+                sudo tar xzf "$ULTIMO_BACKUP" -C /srv/infra/socket-core
+                sudo chown -R 10001:10001 data
+              else
+                echo "   ⚠️ No hay backup disponible; se continúa sin restaurar datos."
+              fi
+
+              echo "→ Reconstruyendo versión anterior..."
+              docker compose build socket-core
+              docker compose up -d --remove-orphans
+
+              OK_RB=0
+              for i in $(seq 1 30); do
+                if salud_ok; then OK_RB=1; break; fi
+                sleep 2
+              done
+              if [ "$OK_RB" = "1" ]; then
+                echo "✅ Rollback completado y servicio sano en la versión anterior ($PREV)."
+              else
+                echo "❌ El rollback tampoco quedó sano. Intervención manual necesaria."
+              fi
+              # El job debe fallar siempre para que se investigue (aunque el rollback sane).
+              exit 1
+            fi
             docker compose ps | grep "Up" || (echo "❌ Error: el contenedor no está corriendo" && exit 1)
-            curl -f http://127.0.0.1:3005/health || (echo "❌ Error: /health no responde" && exit 1)
-            docker exec socket-core curl -fsS http://127.0.0.1:3015/health >/dev/null \
-              || (echo "❌ Error: el listener admin no responde dentro del contenedor" && exit 1)
 
             echo "→ Borde público Nginx (SOLO archivos ws.*/socketcore-*, otros dominios intactos)..."
             sudo cp /etc/nginx/sites-available/ws.seventwo.tech.http.conf /tmp/ws.http.bak 2>/dev/null || true
