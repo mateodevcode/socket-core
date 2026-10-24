@@ -368,6 +368,23 @@ entorno. El resto son constantes compiladas en `src/limits.rs` (y los límites d
 payload/nombres en `src/models.rs`): se cambian en código y se reconstruye la
 imagen; si usas el hub embebido, puedes inyectar `AppState.limits` distinto.
 
+### 6.1 Dimensionar `rate_limit_per_min` de una key
+
+- El límite es **por API key**, compartido por **todos** los usuarios del proyecto
+  (no es por usuario).
+- Cada conexión pide un JWT al abrir y otro en cada renovación (~cada
+  `JWT_TTL_SECS - 60s`; con 600 s ⇒ ~cada 9 min ⇒ ~0,11/min por conexión). Las
+  llamadas REST con la key (emitir, listar, crear canales) también consumen.
+- Tras un reinicio del hub **todos** los clientes reconectan: hay un pico de
+  `/auth/token`. El SDK añade jitter (≤250 ms en el primer connect y backoff con
+  jitter en reconexiones), pero todos comparten la misma key.
+- Nginx limita `/auth/token` a **5 req/s por IP**: si muchos usuarios salen por la
+  misma IP (NAT de oficina), ese es el cuello real antes que el límite de la key.
+- Regla práctica (aproximada): `rate_limit_per_min >= conexiones_esperadas ×
+  (1 + 60/TTL_seg) + llamadas_REST/min`, con margen. Ejemplo: 500 conexiones y TTL
+  600 ⇒ ~500 iniciales + ~55 renovaciones/min ≈ 555/min; pon 1000–1500 y ajústalo
+  observando `/admin/stats` y los logs de 429.
+
 ---
 
 ## 7. Guía de operación

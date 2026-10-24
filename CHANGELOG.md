@@ -384,6 +384,23 @@ sección de cada fase.
 - **B1**: documentado el UPDATE manual para asignar canales huérfanos en
   `docs/DESPLIEGUE.md`.
 
+
+### Verificación pre-despliegue (S1–S8)
+
+- **S1/S4**: errores de publish no fatales (`forbidden`/`invalid_payload`/
+  `message_too_large`) emiten `publish_error` y no cierran; al cerrar el socket
+  activo `publish` lanza `not_connected`.
+- **S2**: fallo de DB a mitad de sesión ⇒ cierre `server_error` (reintentable);
+  el SDK reconecta; key revocada sigue siendo `credential_revoked` fatal.
+- **S3**: una sola reconexión por error+Close (rate_limited ≥10 s).
+- **S5**: `tokenFromEndpoint` (401/403 fatal; 5xx/red backoff).
+- **S6**: presencia por `Set(connection_id)` + seed `/presence`; el solape de
+  renovación no marca offline.
+- **S7**: ejemplo separa `SOCKET_CORE_URL`/`SOCKET_PUBLIC_URL`, `canAccess`,
+  errores genéricos, sirve solo el SDK y no crea el canal.
+- **S8**: jitter inicial, guía de dimensionado de `rate_limit_per_min`, y
+  corrección de la prueba de migración (fue sintética; comandos reales incluidos).
+
 ### Nota de estado
 
 - La suite de integración en `tests/` define el comportamiento objetivo: los

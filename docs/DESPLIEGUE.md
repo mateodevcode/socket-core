@@ -92,7 +92,7 @@ WHERE project_id = '' AND name = 'canal-huerfano';
 Verifica dentro de la copia:
 
 ```bash
-sqlite3 /tmp/migracion-prueba.db "SELECT COUNT(*) FROM channels WHERE project_id='';"
+sqlite3 /tmp/migcheck/hub.db "SELECT COUNT(*) FROM channels WHERE project_id='';"
 ```
 
 Después, en el deploy real (con backup hecho): aplica el UPDATE sobre
@@ -100,9 +100,10 @@ Después, en el deploy real (con backup hecho): aplica el UPDATE sobre
 arranca. Un canal huérfano (`project_id=''`) hoy es **invisible para todos**
 (responde 404) hasta asignarle dueño.
 
-> Si no tienes `sqlite3` en el host, puedes consultar el recuento desde el
-> contenedor con `docker exec` usando python3, o revisar los logs del arranque:
-> la migración informa `Migración de canales: N repartidos por prefijo`.
+> Si no tienes `sqlite3` en el host, puedes consultar la copia con python3:
+> `python3 -c "import sqlite3;c=sqlite3.connect('/tmp/migcheck/hub.db');print(c.execute(\"SELECT COUNT(*) FROM channels WHERE project_id=''\").fetchone()[0])"`
+> o revisar los logs del arranque: la migración informa
+> `Migración de canales: N repartidos por prefijo`.
 
 ### 0.3 Backup de la DB
 

@@ -54,8 +54,9 @@ tu backend lo conoce; así `publish()` rechaza localmente sin ir al servidor.
 
 ## Reconexión y renovación
 
-- **Backoff exponencial con jitter** (500 ms → 30 s) para evitar avalanchas tras
-  `server_shutdown` (Nginx limita `/auth/token` a 5 req/s por IP).
+- **Backoff exponencial con jitter** (500 ms → 30 s) y **jitter inicial ≤250 ms**
+  en el primer connect, para evitar avalanchas tras recargas o `server_shutdown`
+  (Nginx limita `/auth/token` a 5 req/s por IP).
 - **Renovación sin cortes**: ~60 s antes de `exp` abre una conexión nueva, espera
   su handshake, y solo entonces cierra la vieja. Mientras se solapan, los eventos
   se **deduplican por `id`**.

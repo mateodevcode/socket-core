@@ -732,3 +732,28 @@ test("canAccess exige sesión y canal permitido", async () => {
   assert.equal(canAccess({ id: "u1" }, "otro:chat", "demo:chat"), false);
   assert.equal(canAccess({ id: "u1" }, "demo:chat", "demo:chat"), true);
 });
+
+// ---------- S8b: jitter en el primer connect ----------
+
+test("el primer connect aplica jitter (0..250 ms)", { timeout: 25000 }, async () => {
+  const hub = await setupHub();
+  const origSet = globalThis.setTimeout;
+  const delays = [];
+  globalThis.setTimeout = (fn, ms, ...args) => {
+    delays.push(ms);
+    return origSet(fn, ms, ...args);
+  };
+  let sdk;
+  try {
+    sdk = clientSdk(hub, "user-jitter");
+    await waitStatus(sdk, "connected", 15000);
+    assert.ok(
+      delays.length > 0 && delays[0] >= 0 && delays[0] <= 250,
+      `el primer timer debe ser el jitter del connect (0..250 ms), fue ${delays[0]}`,
+    );
+  } finally {
+    globalThis.setTimeout = origSet;
+    sdk?.close();
+    await hub.cleanup();
+  }
+});

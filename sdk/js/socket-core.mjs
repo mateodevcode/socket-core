@@ -20,6 +20,8 @@ const DEFAULT_RENEW_BEFORE_MS = 60_000;
 const MIN_BACKOFF_MS = 500;
 const MAX_BACKOFF_MS = 30_000;
 const RATE_LIMITED_MIN_WAIT_MS = 10_000;
+/** Jitter máximo del PRIMER connect (evita avalancha al recargar muchos clientes). */
+export const _INITIAL_JITTER_MAX_MS = 250;
 
 const FATAL_CODES = new Set([
   "forbidden",
@@ -486,7 +488,8 @@ export function connect(options = {}) {
   };
 
   setStatus("connecting");
-  connectOnce();
+  // Jitter inicial: muchos clientes abriendo a la vez no piden token en el mismo ms.
+  setTimeout(connectOnce, Math.random() * _INITIAL_JITTER_MAX_MS);
   return api;
 }
 
