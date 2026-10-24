@@ -144,6 +144,12 @@ async fn admin_create_key_con_prefijo_solapado_da_400() {
     // A ya usa "a:*"
     let res = hub.admin_create_key("dup-a", "a:*", &["publish"]).await;
     assert_eq!(res.status(), 400, "prefijo a:* solapa con la key existente");
+    let body = res.text().await.unwrap();
+    assert!(
+        body.contains("proj-a"),
+        "el error debe indicar con qué key solapa: {}",
+        body
+    );
 }
 
 #[tokio::test]
@@ -164,6 +170,62 @@ async fn admin_update_key_con_prefijo_solapado_da_400() {
         .admin_patch_key(&hub.project_a, json!({"channel_prefix": "b:*"}))
         .await;
     assert_eq!(res.status(), 400, "mover A a b:* solapa con B");
+    let body = res.text().await.unwrap();
+    assert!(
+        body.contains("proj-b"),
+        "el error debe indicar con qué key solapa: {}",
+        body
+    );
+}
+
+#[tokio::test]
+async fn prefijo_de_key_revocada_sigue_ocupado_hasta_borrarla() {
+    let hub = Hub::start().await;
+    // Creamos una key aparte con su propio prefijo.
+    let res = hub.admin_create_key("rev-pref", "z:*", &["publish"]).await;
+    assert_eq!(res.status(), 201);
+    let body: Value = res.json().await.unwrap();
+    let id = body["data"]["id"].as_str().unwrap().to_string();
+
+    // Revocarla: el prefijo sigue ocupado (el solape cuenta revocadas).
+    let res = hub
+        .client
+        .post(format!("{}/admin/keys/{}/revoke", hub.admin_base, id))
+        .header("x-master-key", common::MASTER_KEY)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+
+    let res = hub.admin_create_key("nueva-z", "z:*", &["publish"]).await;
+    assert_eq!(res.status(), 400);
+    let body = res.text().await.unwrap();
+    assert!(
+        body.contains("rev-pref"),
+        "debe nombrar la key que ocupa el prefijo: {}",
+        body
+    );
+    assert!(
+        body.to_lowercase().contains("revocada"),
+        "debe avisar de que revocadas cuentan: {}",
+        body
+    );
+
+    // Borrar la key revocada libera el prefijo.
+    let res = hub
+        .client
+        .delete(format!("{}/admin/keys/{}", hub.admin_base, id))
+        .header("x-master-key", common::MASTER_KEY)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let res = hub.admin_create_key("nueva-z2", "z:*", &["publish"]).await;
+    assert_eq!(
+        res.status(),
+        201,
+        "tras borrar la key, el prefijo queda libre"
+    );
 }
 
 #[tokio::test]

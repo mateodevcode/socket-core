@@ -395,13 +395,16 @@ pub async fn admin_create_key(
         req.channel_prefix.trim().to_string()
     };
     match state.keys.prefix_conflicts(&prefix, None).await {
-        Ok(true) => {
+        Ok(Some(otra)) => {
             return err(
                 StatusCode::BAD_REQUEST,
-                "channel_prefix solapa con el de otro proyecto",
+                format!(
+                    "channel_prefix solapa con el proyecto '{}' (incluye keys revocadas; bórrala o cámbiale el prefijo para liberarlo)",
+                    otra
+                ),
             )
         }
-        Ok(false) => {}
+        Ok(None) => {}
         Err(e) => {
             tracing::error!("admin_create_key: {}", e);
             return err(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
@@ -489,13 +492,16 @@ pub async fn admin_update_key(
             prefix.trim().to_string()
         };
         match state.keys.prefix_conflicts(&normalized, Some(&id)).await {
-            Ok(true) => {
+            Ok(Some(otra)) => {
                 return err(
                     StatusCode::BAD_REQUEST,
-                    "channel_prefix solapa con el de otro proyecto",
+                    format!(
+                        "channel_prefix solapa con el proyecto '{}' (incluye keys revocadas; bórrala o cámbiale el prefijo para liberarlo)",
+                        otra
+                    ),
                 )
             }
-            Ok(false) => {}
+            Ok(None) => {}
             Err(e) => {
                 tracing::error!("admin_update_key: {}", e);
                 return err(StatusCode::INTERNAL_SERVER_ERROR, "internal error");

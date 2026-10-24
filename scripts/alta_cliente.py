@@ -141,10 +141,12 @@ def explain_create_error(status: int, body_text: str) -> str:
         error = body_text.strip()
     if "solapa" in error.lower():
         return (
-            "El prefijo solapa con el de otro proyecto (o se usa '*', que choca con "
-            "todo). Los proyectos no pueden compartir espacio de nombres.\n"
+            f"{error}\n"
+            "   Los proyectos no pueden compartir espacio de nombres (ni usar '*').\n"
+            "   Incluye keys REVOCADAS: una key revocada sigue ocupando su prefijo\n"
+            "   hasta que se BORRA o se le cambia el prefijo.\n"
             "   Consulta los existentes con:  python3 scripts/alta_cliente.py --list-prefixes\n"
-            "   y elige un prefijo distinto (ej: miotroproyecto:*)."
+            "   Para liberar: borra la key antigua (o edítale el prefijo) y reintenta."
         )
     if "internal" in error.lower() or status >= 500:
         return "Error interno del hub al crear la key. Revisa los logs del contenedor."

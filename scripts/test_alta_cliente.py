@@ -61,9 +61,11 @@ class TestPaquete(unittest.TestCase):
                 self.assertEqual(modo, 0o600)
 
     def test_hint_de_solape_legible(self):
-        cuerpo = '{"success":false,"error":"channel_prefix solapa con el de otro proyecto"}'
+        cuerpo = '{"success":false,"error":"channel_prefix solapa con el proyecto \'otra-key\' (incluye keys revocadas; bórrala o cámbiale el prefijo para liberarlo)"}'
         texto = ac.explain_create_error(400, cuerpo)
         self.assertIn("solapa", texto.lower())
+        self.assertIn("otra-key", texto)
+        self.assertIn("revocada", texto.lower())
         self.assertIn("--list-prefixes", texto)
 
 

@@ -334,33 +334,37 @@ impl KeyStore {
         Ok(Some(key))
     }
 
-    /// Comprueba si el prefijo indicado solapa con alguna otra key.
+    /// Devuelve el NOMBRE de la key con la que solapa (incluye revocadas: una key
+    /// revocada sigue ocupando su prefijo hasta que se borra o se edita).
     /// "*" solapa con todo; "a:*" solapa con "a:*", "a:b:*", "a", etc.
+    /// El nombre no es secreto (ya se lista en /admin/keys).
     pub async fn prefix_conflicts(
         &self,
         prefix_s: &str,
         exclude_id: Option<&str>,
-    ) -> Result<bool, sqlx::Error> {
+    ) -> Result<Option<String>, sqlx::Error> {
         let wanted = prefix_bases(prefix_s);
         if wanted.is_empty() {
-            return Ok(false);
+            return Ok(None);
         }
-        let rows = sqlx::query_as::<_, (String, String)>("SELECT id, channel_prefix FROM api_keys")
-            .fetch_all(&self.pool)
-            .await?;
-        for (id, existing) in rows {
+        let rows = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT id, name, channel_prefix FROM api_keys",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        for (id, name, existing) in rows {
             if Some(id.as_str()) == exclude_id {
                 continue;
             }
             for b in prefix_bases(&existing) {
                 for w in &wanted {
                     if bases_overlap(w, &b) {
-                        return Ok(true);
+                        return Ok(Some(name));
                     }
                 }
             }
         }
-        Ok(false)
+        Ok(None)
     }
 
     /// Comprueba que el proyecto (key) sigue existiendo, activo y vigente.
