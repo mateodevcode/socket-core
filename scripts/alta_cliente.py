@@ -7,7 +7,12 @@ al backend del proyecto.
 
 Uso:
     cd /srv/infra/socket-core
-    python3 scripts/alta_cliente.py [--core http://127.0.0.1:3005] [--env .env]
+    python3 scripts/alta_cliente.py [--env .env] [--admin http://127.0.0.1:3015]
+
+El listener admin NO está publicado: por defecto se intenta primero el acceso
+directo a --admin y, si no responde, se usa:
+    docker exec -i socket-core curl ... http://127.0.0.1:3015/admin/keys
+(ADMIN_PORT por defecto 3015 dentro del contenedor).
 
 Solo librería estándar (sin dependencias).
 """
@@ -15,6 +20,7 @@ Solo librería estándar (sin dependencias).
 import argparse
 import json
 import os
+import subprocess
 import sys
 import urllib.request
 import urllib.error
@@ -66,7 +72,8 @@ def preguntar(txt: str, defecto: str = "") -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Alta de cliente en socket-core")
-    ap.add_argument("--core", default="http://127.0.0.1:3005")
+    ap.add_argument("--core", default="https://ws.seventwo.tech", help="URL pública para los snippets")
+    ap.add_argument("--admin", default="http://127.0.0.1:3015", help="listener admin (loopback)")
     ap.add_argument("--env", default=".env")
     args = ap.parse_args()
 
@@ -103,11 +110,7 @@ def main() -> None:
         print("Cancelado.")
         return
 
-    res = post_json(
-        f"{args.core}/admin/keys",
-        payload,
-        {"Content-Type": "application/json", "X-Master-Key": master},
-    )
+    res = admin_post(args, "/admin/keys", payload, master)
     d = res["data"]
 
     print("\n" + "=" * 60)
@@ -126,8 +129,9 @@ def main() -> None:
     print("    -H 'Content-Type: application/json' \\")
     print(f"    -d '{{\"user_id\":\"user-1\",\"channel\":\"{d['channel_prefix'].replace(':*', ':general') if ':*' in d['channel_prefix'] else d['channel_prefix']}\",\"role\":\"both\"}}'")
     print("-" * 60)
-    print("Revocar:  POST /admin/keys/" + d["id"] + "/revoke  (con X-Master-Key)")
-    print("Borrar:   DELETE /admin/keys/" + d["id"] + "  (con X-Master-Key)")
+    print("Revocar/borrar (listener admin loopback, con X-Master-Key):")
+    print(f"  docker exec -i socket-core curl -sS -X POST http://127.0.0.1:3015/admin/keys/{d['id']}/revoke -H 'X-Master-Key: <MASTER_KEY>'")
+    print(f"  docker exec -i socket-core curl -sS -X DELETE http://127.0.0.1:3015/admin/keys/{d['id']} -H 'X-Master-Key: <MASTER_KEY>'")
     print("=" * 60)
 
 

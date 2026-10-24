@@ -54,7 +54,24 @@ docker compose up -d --build
 curl http://127.0.0.1:3005/health       # {"status":"ok","service":"socket-core"}
 ```
 
-En el VPS el deploy es automático por GitHub Actions (push a `main`); lo único manual es pegar el `.env` una vez. Ver `.github/workflows/deploy.yml`.
+En el VPS el deploy es automático por GitHub Actions (push a `main`, **solo si CI
+pasa**); lo único manual es pegar el `.env` una vez. Antes de reconstruir se guarda
+`backups/data-<fecha>.tgz` (retención 10) y el commit previo en
+`.last_deploy_commit`; el rollback está documentado en `SECURITY.md §7`.
+
+**TRUSTED_PROXIES**: el hub ve el tráfico desde el gateway de `central_network`
+(o la IP del contenedor de Nginx si está en esa red). Averígualo con:
+
+```bash
+docker network inspect central_network --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}'
+```
+
+y ponlo en `TRUSTED_PROXIES`. Sin esa lista `X-Forwarded-For` se ignora (más
+seguro; el rate limit por IP usará el gateway). `scripts/estado.py` lo verifica.
+
+**Contenedor**: corre como UID 10001 con FS de solo lectura. El volumen `data/`
+debe ser escribible por ese UID (`sudo chown -R 10001:10001 data`); el entrypoint
+aborta con mensaje claro si no lo es. El `HEALTHCHECK` prueba `/health` en 3005 y 3015.
 
 ---
 
@@ -233,25 +250,32 @@ curl $CORE/channels/$CH/clients -H "X-Api-Key: $RAW"  # clientes conectados al c
 ### Paso 8 — Administrar keys (requiere `MASTER_KEY`, SOLO por localhost)
 
 ```bash
-ADMIN=http://127.0.0.1:3015   # listener admin (loopback); desde el host: docker exec socket-core curl ...
+# El listener admin vive en 127.0.0.1:3015 DENTRO del contenedor (no publicado).
+# Vía soportada desde el host:
+dc() { docker exec -i socket-core curl -sS "$@"; }
+MASTER=$(grep ^MASTER_KEY= .env | cut -d= -f2)
+
 # Editar una key: solo lo enviado, aplica al instante sin reiniciar
-curl -X PATCH $ADMIN/admin/keys/<KEY_ID> \
-  -H "X-Master-Key: $MASTER_KEY" -H "Content-Type: application/json" \
+dc -X PATCH http://127.0.0.1:3015/admin/keys/<KEY_ID> \
+  -H "X-Master-Key: $MASTER" -H "Content-Type: application/json" \
   -d '{"rate_limit_per_min":3000}'
 # Campos editables: name, domains, channel_prefix, scopes, rate_limit_per_min,
 #   expires_in_days (días desde hoy; 0 = quitar expiración; omitido = no tocar)
 # Quitar acceso a un PROYECTO entero (efecto inmediato)
-curl -X POST $ADMIN/admin/keys/<KEY_ID>/revoke -H "X-Master-Key: $MASTER_KEY"
+dc -X POST http://127.0.0.1:3015/admin/keys/<KEY_ID>/revoke -H "X-Master-Key: $MASTER"
 # Borrar la key definitivamente
-curl -X DELETE $ADMIN/admin/keys/<KEY_ID> -H "X-Master-Key: $MASTER_KEY"
+dc -X DELETE http://127.0.0.1:3015/admin/keys/<KEY_ID> -H "X-Master-Key: $MASTER"
 # Revocar un JWT concreto (sácale el jti decodificando el payload base64)
-curl -X POST "$ADMIN/admin/tokens/revoke?jti=<JTI>" \
-  -H "X-Master-Key: $MASTER_KEY" -H "Content-Type: application/json" -d '{}'
+dc -X POST "http://127.0.0.1:3015/admin/tokens/revoke?jti=<JTI>" \
+  -H "X-Master-Key: $MASTER" -H "Content-Type: application/json" -d '{}'
 # Ver todas las keys (sin exponer los secretos, solo metadatos)
-curl $ADMIN/admin/keys -H "X-Master-Key: $MASTER_KEY"
+dc http://127.0.0.1:3015/admin/keys -H "X-Master-Key: $MASTER"
 # Estadísticas globales por proyecto (canales, conexiones, clientes) — sin payloads
-curl $ADMIN/admin/stats -H "X-Master-Key: $MASTER_KEY"
+dc http://127.0.0.1:3015/admin/stats -H "X-Master-Key: $MASTER"
 ```
+
+`scripts/alta_cliente.py` y `scripts/estado.py` hacen esto automáticamente
+(acceso directo → fallback `docker exec`).
 
 ---
 

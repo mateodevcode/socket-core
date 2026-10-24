@@ -12,7 +12,9 @@ RUN mkdir src && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs \
     && cargo build --release || true
 RUN rm -rf src
 COPY src ./src
-RUN cargo build --release
+# COPY puede conservar mtimes antiguos y Cargo creería que el binario dummy
+# (del cache de dependencias) sigue al día. Forzamos mtime antes de compilar.
+RUN find src -type f -exec touch {} + && cargo build --release
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -23,6 +25,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 RUN mkdir -p /app/data && chown -R app:app /app
 COPY --from=builder --chown=app:app /app/target/release/socket-core /app/socket-core
+COPY --chown=app:app docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod 0555 /app/docker-entrypoint.sh
 
 # Usuario sin privilegios y sin shell.
 USER app
@@ -31,7 +35,8 @@ EXPOSE 3005
 # El listener admin (ADMIN_PORT, 3015) escucha en 127.0.0.1 dentro del contenedor:
 # no se expone y no es alcanzable desde otros contenedores.
 
+# Comprueba AMBOS listeners (público y admin) desde dentro del contenedor.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:3005/health || exit 1
+    CMD sh -c 'curl -fsS http://127.0.0.1:3005/health >/dev/null && curl -fsS http://127.0.0.1:3015/health >/dev/null' || exit 1
 
-CMD ["./socket-core"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

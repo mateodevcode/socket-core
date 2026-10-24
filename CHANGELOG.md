@@ -243,6 +243,37 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 - El contenedor es de solo lectura: escribe únicamente en `/app/data` y `/tmp`.
 - `ci.yml` debe ser el check requerido en la protección de `main`.
 
+
+#### Ampliación Fase 6 (contenedor/CI)
+
+- **Entrypoint** `docker-entrypoint.sh`: verifica que `/app/data` sea escribible por
+  UID 10001 (prueba de escritura real) y aborta con instrucciones si no lo es.
+  Complementa el `chown` del Dockerfile (el bind mount del host manda).
+- **HEALTHCHECK** comprueba `/health` en el listener público (3005) y en el admin
+  (3015) dentro del contenedor; `/health` se añadió también al router admin.
+- **Acceso admin elegido**: `docker exec -i socket-core curl ... http://127.0.0.1:3015/...`.
+  `scripts/alta_cliente.py` y `scripts/estado.py` lo usan automáticamente (directo →
+  fallback `docker exec`).
+- **TRUSTED_PROXIES**: documentado cómo obtener el gateway de `central_network`
+  (`docker network inspect ... .IPAM.Config.Gateway`) o la IP del contenedor Nginx;
+  `scripts/estado.py` verifica que la configuración lo incluya.
+- **Deploy**: backup fechado `backups/data-AAAAMMDD-HHMMSS.tgz` ANTES de reconstruir
+  (retención 10), guarda el commit previo en `.last_deploy_commit`, y **rollback
+  documentado** en `SECURITY.md §7` (commit anterior + restaurar backup + rebuild).
+- **CI/CD unificado**: `ci.yml` con jobs `quality` y `deploy` (`needs: [quality]`,
+  solo push a `main`): el deploy no arranca si CI falla. Actions fijadas por versión
+  exacta. Eliminado `deploy.yml` para evitar dobles despliegues.
+- **Dos bugs encontrados al probar el contenedor de verdad** (corregidos):
+  1. La imagen podía incluir el **binario dummy** de cache: `COPY` conservaba mtimes
+     antiguos y Cargo no recompilaba. Ahora se hace `find src -type f -exec touch`
+     antes del build (verificado: binario real de 9,7 MB, no 437 KB).
+  2. El servicio se **auto-apagaba** a los `SHUTDOWN_GRACE_SECS` (10 s) porque el
+     timeout de gracia se iniciaba al arrancar. Ahora la gracia empieza solo al
+     recibir la señal; con test de regresión (`servidor_no_se_apaga_solo_antes_de_la_senal`).
+- Prueba real del contenedor: `--read-only --tmpfs /tmp --cap-drop ALL
+  --security-opt no-new-privileges` + volumen: arranca como UID 10001, crea
+  `socket-core.db` propio, ambos `/health` OK, `docker stop` en ~1 s. Prueba
+  negativa: volumen no escribible ⇒ el entrypoint aborta con instrucciones.
 ### Nota de estado
 
 - La suite de integración en `tests/` define el comportamiento objetivo: los

@@ -433,3 +433,46 @@ async fn apagado_respeta_timeout_de_gracia() {
     let termino = socket_core::await_shutdown(async {}, Duration::from_millis(500)).await;
     assert!(termino);
 }
+
+#[tokio::test]
+async fn servidor_no_se_apaga_solo_antes_de_la_senal() {
+    // Regresión: el plazo de gracia NO debe iniciarse al arrancar (antes el
+    // servicio se auto-apagaba a los SHUTDOWN_GRACE_SECS).
+    let bus = socket_core::control::ControlBus::new();
+    let fut = socket_core::await_servers_with_grace(
+        std::future::pending::<()>(),
+        std::future::pending::<()>(),
+        &bus,
+        None,
+        Duration::from_millis(150),
+    );
+    tokio::pin!(fut);
+    let seguia_vivo = tokio::time::timeout(Duration::from_millis(700), &mut fut)
+        .await
+        .is_err();
+    assert!(
+        seguia_vivo,
+        "sin señal no debe terminar aunque pase la gracia"
+    );
+}
+
+#[tokio::test]
+async fn apagado_por_senal_respeta_gracia_y_termina() {
+    let bus = socket_core::control::ControlBus::new();
+    let servidores = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(2),
+        socket_core::await_servers_with_grace(
+            servidores,
+            std::future::ready(()),
+            &bus,
+            None,
+            Duration::from_millis(500),
+        ),
+    )
+    .await
+    .expect("debe terminar dentro de la gracia");
+    assert_eq!(outcome, socket_core::ShutdownOutcome::Completed);
+}

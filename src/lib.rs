@@ -93,6 +93,8 @@ pub fn build_public_router(state: AppState) -> Router {
 /// Router de administración: se sirve SOLO en loopback (ADMIN_PORT).
 pub fn build_admin_router(state: AppState) -> Router {
     Router::new()
+        // Health sin auth en el listener admin: lo usa el HEALTHCHECK del contenedor.
+        .route("/health", get(handlers::health))
         .route("/admin/keys", get(handlers::admin_list_keys))
         .route("/admin/keys", post(handlers::admin_create_key))
         .route("/admin/keys/:id/revoke", post(handlers::admin_revoke_key))
@@ -290,14 +292,6 @@ pub async fn serve_with_config(
     tracing::info!("Socket-Core admin (loopback) en http://{}", admin_addr);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let bus = state.control.clone();
-    tokio::spawn(async move {
-        shutdown_signal().await;
-        tracing::info!("apagado ordenado: cerrando WebSockets");
-        bus.send(control::ControlEvent::Shutdown);
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        let _ = shutdown_tx.send(true);
-    });
 
     let mut rx1 = shutdown_rx.clone();
     let server1 = axum::serve(
@@ -315,16 +309,66 @@ pub async fn serve_with_config(
     .with_graceful_shutdown(async move {
         let _ = rx2.changed().await;
     });
-    let both = async {
+    let servers = async {
         let _ = tokio::join!(server1, server2);
     };
-    let finished = await_shutdown(both, std::time::Duration::from_secs(grace_secs)).await;
-    if !finished {
+    tokio::pin!(servers);
+
+    // El timeout de gracia NO empieza al arrancar: solo tras la señal de apagado.
+    let outcome = await_servers_with_grace(
+        servers,
+        shutdown_signal(),
+        &state.control,
+        Some(shutdown_tx),
+        std::time::Duration::from_secs(grace_secs),
+    )
+    .await;
+    if outcome == ShutdownOutcome::GraceExpired {
         tracing::warn!(
             "apagado: tiempo de gracia ({}s) agotado; terminando de todas formas",
             grace_secs
         );
         std::process::exit(0);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownOutcome {
+    Completed,
+    GraceExpired,
+}
+
+/// Ejecuta los servidores hasta que llegue `signal`; entonces avisa por el bus y
+/// espera como máximo `grace`. Si los servidores no terminan, devuelve GraceExpired.
+/// (El plazo de gracia empieza SOLO al recibir la señal, no al arrancar.)
+pub async fn await_servers_with_grace<Fut, Sig>(
+    servers: Fut,
+    signal: Sig,
+    bus: &control::ControlBus,
+    shutdown_tx: Option<tokio::sync::watch::Sender<bool>>,
+    grace: std::time::Duration,
+) -> ShutdownOutcome
+where
+    Fut: std::future::Future<Output = ()>,
+    Sig: std::future::Future<Output = ()>,
+{
+    tokio::pin!(servers);
+    tokio::select! {
+        _ = &mut servers => return ShutdownOutcome::Completed,
+        _ = signal => {}
+    }
+
+    tracing::info!("apagado ordenado: cerrando WebSockets");
+    bus.send(control::ControlEvent::Shutdown);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    if let Some(tx) = shutdown_tx {
+        let _ = tx.send(true);
+    }
+
+    if tokio::time::timeout(grace, &mut servers).await.is_err() {
+        ShutdownOutcome::GraceExpired
+    } else {
+        ShutdownOutcome::Completed
     }
 }
 

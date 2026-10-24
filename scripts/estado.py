@@ -73,9 +73,10 @@ def admin_stats(args, master: str):
     if s == 200:
         return s, b, "directo"
     # El listener admin escucha en loopback del contenedor: probar docker exec.
+    port = args.admin.rstrip("/").rsplit(":", 1)[-1] or "3015"
     cmd = (
         "docker exec socket-core curl -s --max-time 5 "
-        f"-H 'X-Master-Key: {master}' http://127.0.0.1:3015/admin/stats"
+        f"-H 'X-Master-Key: {master}' http://127.0.0.1:{port}/admin/stats"
     )
     r = sh(cmd)
     if r and r.returncode == 0 and (r.stdout or "").strip():
@@ -89,8 +90,47 @@ def admin_stats(args, master: str):
 def sh(cmd: str):
     try:
         return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
-    except Exception as e:
+    except Exception:
         return None
+
+
+def red_gateway() -> str:
+    r = sh("docker network inspect central_network --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}'")
+    return (r.stdout or "").strip() if r and r.returncode == 0 else ""
+
+
+def red_containers() -> list:
+    """IPs de los contenedores conectados a central_network."""
+    r = sh("docker network inspect central_network --format '{{range .Containers}}{{.IPv4Address}} {{end}}'")
+    out = (r.stdout or "") if r and r.returncode == 0 else ""
+    return [x.split("/")[0].strip() for x in out.split() if x.strip()]
+
+
+def trusted_proxies_config() -> str:
+    r = sh("docker inspect socket-core --format '{{range .Config.Env}}{{println .}}{{end}}'")
+    for line in ((r.stdout or "") if r else "").splitlines():
+        if line.startswith("TRUSTED_PROXIES="):
+            return line.split("=", 1)[1].strip()
+    return ""
+
+
+def check_trusted_proxies() -> bool:
+    """Comprueba que la IP del gateway (o la de un contenedor de la red) esté confiada."""
+    trusted = trusted_proxies_config()
+    gw = red_gateway()
+    candidatas = ([gw] if gw else []) + red_containers()
+    if not trusted:
+        print(f"[AVISO] TRUSTED_PROXIES vacío: se ignora X-Forwarded-For y el rate limit "
+              f"por IP verá el gateway {gw or '?'}. Si Nginx está delante, añade esa IP.")
+        return False
+    for ip in candidatas:
+        if ip and ip in [t.strip() for t in trusted.split(",")]:
+            pintar(True, "TRUSTED_PROXIES", f"contiene {ip}")
+            return True
+    print(f"[AVISO] TRUSTED_PROXIES={trusted!r} no incluye el gateway {gw or '?'} "
+          f"ni IPs de central_network {candidatas}. Revisa: "
+          f"docker network inspect central_network --format '{{{{range .IPAM.Config}}}}{{{{.Gateway}}}}{{{{end}}}}'")
+    return False
 
 
 def main() -> int:
@@ -120,6 +160,9 @@ def main() -> int:
         else:
             pintar(False, "health local :3005", str(b.get("_error", b)))
             alertas.append("health local falla")
+
+        if not check_trusted_proxies():
+            alertas.append("TRUSTED_PROXIES sin configurar/incorrecto")
 
     # 2. Salud pública + stats
     s, b = get_json(f"{args.core}/health")

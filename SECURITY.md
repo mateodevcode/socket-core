@@ -45,23 +45,86 @@ GitHub) y los pasos manuales de seguridad que debes completar una vez.
 
 - El contenedor corre como **UID/GID 10001** con FS de solo lectura. El volumen
   `./data` debe ser escribible por ese UID:
-  `sudo chown -R 10001:10001 ./data` (el deploy ya lo hace).
-- **Backups**: copia `data/socket-core.db` (y `-wal`/`-shm` si existen) antes de
-  cada despliegue; guarda fuera del servidor.
-- `ADMIN_PORT` no se publica; el acceso es solo por `docker exec`/SSH local.
-- `TRUSTED_PROXIES` debe contener únicamente la IP del Nginx local
-  (`127.0.0.1` si Nginx y el hub comparten host/namespace). No confíes en
-  cabeceras de clientes directos.
+  `sudo chown -R 10001:10001 ./data` (el deploy ya lo hace). El entrypoint
+  (`docker-entrypoint.sh`) aborta con un mensaje claro si el volumen no es
+  escribible, antes de intentar abrir SQLite.
+- **Backups**: el deploy guarda `backups/data-AAAAMMDD-HHMMSS.tgz` antes de
+  reconstruir (retención 10). Cópialos también fuera del servidor.
+- `ADMIN_PORT` no se publica; el acceso es solo por `docker exec` (ver §4).
+- `TRUSTED_PROXIES` debe contener el **gateway de `central_network`** (o la IP del
+  contenedor de Nginx si está en esa red), NO `127.0.0.1` salvo que compartan
+  namespace. Averígualo en §5.
 - Nginx sobrescribe `X-Forwarded-For` con `$remote_addr`; no lo cambies a
   `$proxy_add_x_forwarded_for`.
 
-## 4. CI/CD (verificación)
+## 4. Acceso a /admin (vía elegida)
+
+El listener admin escucha en `127.0.0.1:ADMIN_PORT` **dentro del contenedor** y no
+se publica. La vía soportada es `docker exec`:
+
+```bash
+docker exec -i socket-core curl -sS \
+  -H "X-Master-Key: $(grep ^MASTER_KEY= .env | cut -d= -f2)" \
+  http://127.0.0.1:3015/admin/stats
+```
+
+- `scripts/alta_cliente.py` y `scripts/estado.py` intentan el acceso directo a
+  `--admin` y caen automáticamente a `docker exec`.
+- El `HEALTHCHECK` comprueba `/health` en 3005 **y** en 3015 dentro del contenedor.
+- Nunca publiques `ADMIN_PORT` en compose ni lo expongas por Nginx.
+
+## 5. TRUSTED_PROXIES: cómo obtener la IP correcta
+
+El contenedor ve la conexión desde el **gateway de `central_network`** (o desde la
+IP del contenedor de Nginx si Nginx está en esa red), no desde la IP del cliente.
+
+```bash
+# Gateway de la red Docker
+docker network inspect central_network --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}'
+
+# Si Nginx es un contenedor en central_network, su IP:
+docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' <contenedor-nginx>
+```
+
+Añade esa IP/CIDR a `TRUSTED_PROXIES` en `.env` y reinicia el servicio.
+`scripts/estado.py` compara el gateway y las IPs de `central_network` con lo
+configurado y avisa si no coincide. Sin lista, `X-Forwarded-For` se ignora.
+
+## 6. CI/CD (verificación)
 
 El workflow `.github/workflows/ci.yml` ejecuta en PR y push:
 `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test
---all-targets` y `cargo audit`. El deploy depende de que CI concluya con éxito.
+--all-targets` y `cargo audit`. El job `deploy` usa `needs: [quality]` y solo se
+ejecuta en push a `main`: **no despliega si CI falla**. Las actions están fijadas
+por versión exacta (`checkout@v4.2.2`, `rust-toolchain@1.97.0`,
+`rust-cache@v2.7.8`, `ssh-action@v1.2.0`).
 
-## 5. Reporte de vulnerabilidades
+## 7. Backup y rollback del despliegue
+
+Antes de reconstruir, el deploy guarda el commit anterior en `.last_deploy_commit`
+y un backup fechado del volumen en `backups/data-AAAAMMDD-HHMMSS.tgz`.
+
+**Rollback documentado:**
+
+```bash
+cd /srv/infra/socket-core
+
+# 1) Volver al commit que funcionaba
+PREV=$(cat .last_deploy_commit)
+git fetch origin
+git reset --hard "$PREV"
+
+# 2) Restaurar los datos de ese momento (elige el backup anterior al fallo)
+sudo tar xzf backups/data-20260101-120000.tgz -C /srv/infra/socket-core
+sudo chown -R 10001:10001 data
+
+# 3) Reconstruir y levantar
+docker compose build socket-core
+docker compose up -d --remove-orphans
+curl -f http://127.0.0.1:3005/health
+```
+
+## 8. Reporte de vulnerabilidades
 
 Si encuentras un fallo de seguridad, no abras un issue público: escribe a la
 persona responsable del repositorio por un canal privado y adjunta reproducción,

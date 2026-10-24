@@ -11,3 +11,5 @@ proyectos.md
 proyectos/
 __pycache__/
 *.pyc
+backups/
+.last_deploy_commit
