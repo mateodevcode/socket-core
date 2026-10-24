@@ -67,6 +67,8 @@ impl AppConfig {
     /// MASTER_KEY debe existir y tener >= 32 caracteres.
     /// STUB TDD (FASE 1): se implementa de verdad en la fase de arranque estricto.
     pub fn validate_secrets(&self) -> Result<(), String> {
+        // STUB: NO valida nada todavía. Siempre Ok. La implementación real
+        // (mutua, con todo! si se quisiera bloquear) llega en la fase de arranque estricto.
         let _ = (&self.jwt_secret, &self.master_key);
         Ok(())
     }
