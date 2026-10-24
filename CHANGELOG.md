@@ -4,6 +4,39 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 
 ## [Unreleased] — hardening (rama `security-hardening`)
 
+## Guía de migración rápida (fases 2 → 7)
+
+Resumen de TODO lo incompatible y qué hacer en cada caso. El detalle está en la
+sección de cada fase.
+
+| # | Cambio incompatible (fase) | Qué debes hacer |
+|---|---|---|
+| 1 | La **API key ya no es token** de WS/Bearer; `sc_live_` en `Authorization`/`?token=` → 401 (F2) | Backend: pide JWT en `/auth/token` con `X-Api-Key`. Frontend: abre WS solo con el JWT. |
+| 2 | Canales con **dueño**; listados/stats/clientes filtrados; canal ajeno → **404**; canales viejos sin prefijo quedan huérfanos e inaccesibles (F2) | Revisa `channel_prefix` de las keys; renombra/asigna canales huérfanos (ver `docs/DESPLIEGUE.md`). |
+| 3 | `emit_event` con ramas **exclusivas**; errores de rate limit ya no se enmascaran como 401 (F2) | Ajusta clientes que esperasen 401 bajo rate limit: ahora es 429. |
+| 4 | **Identidad = `sub`**; se ignora `client_id` del handshake; hay `connection_id`; targets por usuario (F2/F3) | Backend: fija `user_id` al pedir JWT. Frontend: handshake `{channel, device?}`; targets = `user_id`. |
+| 5 | Prefijos **estrictos**: `a:*` no acepta `a`, `a:`, `a2:x` ni `A:x` (F2) | Usa nombres `prefijo:segmento`. |
+| 6 | **`source` de WS lo impone el servidor** (`proyecto:sub`); `__system__` y tipos de sistema reservados (F3) | No falsifiques `source`; los eventos de sistema solo los emite el hub. |
+| 7 | **Límites de payload**: 64 KB, profundidad 16, targets ≤50 (128 chars), frame >64 KB cierra (F3) | Reduce payloads; parte mensajes grandes. |
+| 8 | Envelope de error WS `{"type":"error","code":...}`; presencia `{user, connection_id, total_clients}` **sin lista** (F3/F5) | Cambia parsers de `error` a `type/code`; usa `GET /channels/:id/clients` para la lista. |
+| 9 | **JWT**: HS256, `iss`/`aud` obligatorios, leeway 5 s; tokens viejos dejan de valer (F4) | Deja expirar o pide tokens nuevos tras desplegar. |
+| 10 | **Revocación activa** cierra WS al instante; fail-closed (DB caída → 500) (F4) | Maneja cierres `credential_revoked`/`token_revoked`/`channel_deleted` como definitivos. |
+| 11 | Límites WS: 50/proyecto, 20/IP, handshake 8 s, ping 30 s, idle 120 s, publish 50/s por conexión (F4) | Revisa reconexiones; el SDK ya aplica backoff+jitter. |
+| 12 | `sub` (`user_id`) **obligatorio** y validado (≤128, sin `*`/`:`) (F4.1) | Envía siempre un ID opaco. |
+| 13 | Rol **exacto** y **scopes vivos**: `both` exige ambos scopes; retirar `publish` invalida JWT viejos para publicar (F4.1) | Revisa scopes de cada key; no confíes en tokens antiguos. |
+| 14 | **Prefijos no solapan** entre keys (incluido `*`); keys revocadas siguen ocupando prefijo hasta borrarlas (F4.1) | Borra o cambia el prefijo de la key vieja antes de reutilizarlo. |
+| 15 | Validación de **nombre de canal** (≤128, sin UUID, charset), `description` ≤500 (F4.1) | Ajusta nombres/descripciones. |
+| 16 | Errores de DB → **500 genérico**; creación de canales **atómica** (F4.1) | No dependas de 201 con errores internos; reintenta 500. |
+| 17 | **Arranque estricto**: aborta con secretos débiles/TTL fuera de rango/`ALLOWED_ORIGINS` ausente en prod (F5) | Actualiza `.env` (ver `docs/DESPLIEGUE.md §0.1`). |
+| 18 | **`ALLOW_BOOTSTRAP=false`** por defecto; si se activa, la key va a `data/bootstrap-key.txt` 0600 (F5) | Usa `alta_cliente.py`; no esperes la key en logs. |
+| 19 | **`/admin/*` fuera del puerto público** (404); listener en `ADMIN_PORT` loopback (F5) | Opera con `docker exec` (ver `docs/COMO-FUNCIONA.md §7`). |
+| 20 | **IP de confianza**: XFF solo se lee desde `TRUSTED_PROXIES`; rate limit por IP **antes** de validar la key; 429 con `Retry-After` (F5) | Configura `TRUSTED_PROXIES` con el gateway de `central_network`. |
+| 21 | Listener admin con **lockout** (5 fallos/60 s) y comparación en tiempo constante (F5) | No automatices reintentos de MASTER_KEY. |
+| 22 | **Auditoría** sin secretos; errores internos ya no se filtran al cliente (F5) | Ajusta tests que buscasen detalles internos. |
+| 23 | **Contenedor**: UID 10001, `read_only`, admin no publicado; el volumen debe ser escribible por 10001 (F6) | `sudo chown -R 10001:10001 data`; no publiques `ADMIN_PORT`. |
+| 24 | Deploy **solo si CI pasa** (`needs`), backups fechados y rollback documentado (F6) | Configura el check de CI como requerido en `main` (ver `SECURITY.md`). |
+| 25 | **SDK** nuevo y herramientas: `alta_cliente.py` ya no imprime la API key (fichero 0600) y exige dominios reales; `estado.py` usa `/admin/stats` con MASTER_KEY (F7) | Usa el paquete 0600; no esperes la key por pantalla; define `SOCKET_MASTER_KEY`. |
+
 ### FASE 2 — Aislamiento de proyectos
 
 **Aislamiento total entre proyectos** ahora es propiedad real, no un accidente de producción.
@@ -316,6 +349,22 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
   propio SDK/test (detección de presencia por `payload.type`, y un helper de test que
   consumía el body antes de parsearlo).
 
+
+### FASE 8 — Documentación
+
+#### Cambios
+
+1. Nuevos documentos: `docs/COMO-FUNCIONA.md` (con salidas reales y diagrama),
+   `docs/DESPLIEGUE.md` (checklist, migración sobre copia, verificación y rollback),
+   y `docs/CODIGOS.md` ya existente como contrato estable.
+2. **Doc ejecutable**: `scripts/test_docs_curl.py` extrae los bloques
+   ```bash-doc-exec``` de `docs/COMO-FUNCIONA.md` y los ejecuta contra un hub
+   temporal (falla si la documentación se desincroniza). Añadido a CI.
+3. **Corrección del SDK** (no del servidor): un cierre fatal (`credential_revoked`,
+   `forbidden`, ...) que llega **durante una renovación** ahora emite `fatal` y no
+   entra en bucle de reintentos. Test: `credential_revoked durante renovación`.
+4. `README.md` saneado (sin dominio real ni nombres de clientes) y actualizado al
+   comportamiento real; `SECURITY.md` revisado y enlazado con los nuevos docs.
 ### Nota de estado
 
 - La suite de integración en `tests/` define el comportamiento objetivo: los

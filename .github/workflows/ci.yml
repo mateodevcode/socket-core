@@ -38,6 +38,11 @@ jobs:
       - name: Tests
         run: cargo test --all-targets
 
+      - name: Documentación ejecutable
+        run: |
+          cargo build
+          python3 scripts/test_docs_curl.py
+
       - name: Instalar cargo-audit
         run: cargo install cargo-audit --locked
 

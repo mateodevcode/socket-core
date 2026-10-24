@@ -343,3 +343,26 @@ test("renueva con solape y deduplica por id", { timeout: 40000 }, async () => {
     await hub.cleanup();
   }
 });
+
+// ---------- Fatal durante la renovación (regresión) ----------
+
+test("credential_revoked durante renovación => fatal (no bucle)", { timeout: 30000 }, async () => {
+  const hub = await setupHub(60);
+  const statuses = [];
+  const sdk = clientSdk(hub, "user-renew-revoked", {
+    _renewBeforeMs: 58_000, // renueva ~2 s después de conectar
+  });
+  sdk.on("status", (s) => statuses.push(s));
+  try {
+    await waitStatus(sdk, "connected");
+    const okRenewing = await waitFor(() => statuses.includes("renewing"), 8000);
+    assert.ok(okRenewing, `debe renovar: ${JSON.stringify(statuses)}`);
+    const rev = await adminJson(hub.adminPort, `/admin/keys/${hub.keyId}/revoke`, "POST");
+    assert.equal(rev.status, 200);
+    const fatal = await once(sdk, "fatal", 8000);
+    assert.equal(fatal.code, "credential_revoked");
+  } finally {
+    sdk.close();
+    await hub.cleanup();
+  }
+});

@@ -407,14 +407,16 @@ export function connect(options = {}) {
       return;
     }
     if (msg && msg.type === "error") {
-      if (sock.mode === "renewal") {
-        // La renovación fue rechazada: seguimos con la conexión vieja y reintentamos.
+      const code = msg.code || "invalid_payload";
+      // Durante una renovación, un error transitorio no debe tumbar la conexión
+      // buena; pero un código fatal (key revocada, forbidden, ...) sí escala.
+      if (sock.mode === "renewal" && _classifyClose(code) !== "fatal") {
         if (state.candidate === sock) state.candidate = null;
         safeClose(sock);
         scheduleRenewalRetry();
         return;
       }
-      handleServerError(msg.code || "invalid_payload", msg.detail);
+      handleServerError(code, msg.detail);
       return;
     }
 

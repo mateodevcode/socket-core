@@ -1,5 +1,8 @@
 # Seguridad — configuración manual en GitHub y operación
 
+Documentación relacionada: [`docs/COMO-FUNCIONA.md`](docs/COMO-FUNCIONA.md),
+[`docs/DESPLIEGUE.md`](docs/DESPLIEGUE.md) y [`docs/CODIGOS.md`](docs/CODIGOS.md).
+
 Este archivo lista lo que **no se puede versionar** (ajustes de la cuenta/repo en
 GitHub) y los pasos manuales de seguridad que debes completar una vez.
 
