@@ -1,12 +1,12 @@
+use crate::authz::{authorize_channel_for_jwt, AuthzError, ChannelAction};
 use crate::handlers::AppState;
-use crate::middleware::{jwt_can_access_channel, request_origin};
 use crate::models::{ClientType, Event};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Query, State,
     },
-    http::{HeaderMap, StatusCode},
+    http::HeaderMap,
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -25,16 +25,15 @@ pub async fn websocket_handler(
     headers: HeaderMap,
     Query(params): Query<WsParams>,
 ) -> impl IntoResponse {
-    // Gate previo: exige token (JWT o service key) ANTES del upgrade para no malgastar recursos.
-    // El chequeo fino de canal se hace dentro del handshake (necesita channel del primer mensaje).
+    // Gate previo: exige JWT ANTES del upgrade para no malgastar recursos.
+    // Con la API key cruda como token require_jwt ya devuelve 401 (sin puentes).
     match crate::middleware::require_jwt(&state, &headers, params.token.as_deref()).await {
         Ok(claims) => {
-            let origin = request_origin(&headers);
             info!(
-                "WS pre-auth ok project={} sub={} origin={:?}",
-                claims.project_name, claims.sub, origin
+                "WS pre-auth ok project={} sub={}",
+                claims.project_name, claims.sub
             );
-            ws.on_upgrade(move |socket| handle_socket(socket, state, headers, claims))
+            ws.on_upgrade(move |socket| handle_socket(socket, state, claims))
         }
         Err((code, msg)) => {
             warn!("WS rechazado: {} ({})", msg, code);
@@ -43,36 +42,26 @@ pub async fn websocket_handler(
     }
 }
 
-async fn handle_socket(
-    socket: WebSocket,
-    state: AppState,
-    headers: HeaderMap,
-    claims: crate::auth::Claims,
-) {
+async fn handle_socket(socket: WebSocket, state: AppState, claims: crate::auth::Claims) {
     let (mut sender, mut receiver) = socket.split();
-    let _ = headers; // reservado para auditoría futura (IP ya validada en pre-auth)
 
-    // Handshake: { "channel": "...", "client_id": "..." }
-    let (channel_id, client_id) = match receiver.next().await {
+    // Handshake: { "channel": "<id o nombre>" } — la identidad NO la declara el cliente
+    // (viene del JWT; en la fase de identidad se elimina client_id del protocolo).
+    let channel_ref = match receiver.next().await {
         Some(Ok(msg)) => {
             if let Ok(text) = msg.to_text() {
                 match serde_json::from_str::<serde_json::Value>(text) {
-                    Ok(obj) => {
-                        let channel = obj.get("channel").and_then(|v| v.as_str());
-                        let client = obj.get("client_id").and_then(|v| v.as_str());
-                        match (channel, client) {
-                            (Some(c), Some(cl)) => (c.to_string(), cl.to_string()),
-                            _ => {
-                                let _ = sender
-                                    .send(Message::Text(
-                                        json!({"error": "Missing channel or client_id"})
-                                            .to_string(),
-                                    ))
-                                    .await;
-                                return;
-                            }
+                    Ok(obj) => match obj.get("channel").and_then(|v| v.as_str()) {
+                        Some(c) if !c.trim().is_empty() => c.to_string(),
+                        _ => {
+                            let _ = sender
+                                .send(Message::Text(
+                                    json!({"error": "falta el canal en el handshake"}).to_string(),
+                                ))
+                                .await;
+                            return;
                         }
-                    }
+                    },
                     _ => {
                         let _ = sender
                             .send(Message::Text(json!({"error": "Invalid JSON"}).to_string()))
@@ -87,57 +76,41 @@ async fn handle_socket(
         _ => return,
     };
 
-    // Autorización fina: el JWT debe cubrir este canal (por id o nombre).
-    // Resolvemos nombre si el cliente mandó un ID: el manager guarda id->Channel{name}.
-    let name_lookup = state
-        .channel_manager
-        .get_channel(&channel_id)
-        .map(|c| c.name.clone());
-    // También soportar que el cliente mande el NOMBRE en vez del id: buscar id por nombre.
-    let effective_id = if state.channel_manager.get_channel(&channel_id).is_some() {
-        channel_id.clone()
-    } else {
-        // buscar por nombre
-        let found = state
-            .channel_manager
-            .list_channels()
-            .into_iter()
-            .find(|c| c.name == channel_id)
-            .map(|c| c.id);
-        match found {
-            Some(id) => id,
-            None => {
-                let _ = sender
-                    .send(Message::Text(
-                        json!({"error": "Channel not found"}).to_string(),
-                    ))
-                    .await;
-                return;
-            }
+    // Autorización central única (proyecto dueño + rol subscribe + cobertura del claim).
+    let effective_id = match authorize_channel_for_jwt(
+        &state.channel_manager,
+        &state.keys.pool,
+        &claims,
+        &channel_ref,
+        ChannelAction::Subscribe,
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(AuthzError::NotFound) => {
+            let _ = sender
+                .send(Message::Text(
+                    json!({"error": "Channel not found"}).to_string(),
+                ))
+                .await;
+            return;
+        }
+        Err(e) => {
+            warn!(
+                "WS sub={} denegado en canal {} ({:?})",
+                claims.sub, channel_ref, e
+            );
+            let _ = sender
+                .send(Message::Text(
+                    json!({"error": "forbidden para este canal"}).to_string(),
+                ))
+                .await;
+            return;
         }
     };
-    let name_for_check = name_lookup.clone().unwrap_or_else(|| channel_id.clone());
-    if !jwt_can_access_channel(&state, &claims, &effective_id, Some(&name_for_check)).await
-        && !jwt_can_access_channel(&state, &claims, &channel_id, Some(&name_for_check)).await
-    {
-        warn!("WS sub={} sin acceso al canal {}", claims.sub, channel_id);
-        let _ = sender
-            .send(Message::Text(
-                json!({"error": "No autorizado para este canal"}).to_string(),
-            ))
-            .await;
-        return;
-    }
 
-    // Solo roles con subscribe pueden abrir WS
-    if !claims.can_subscribe() {
-        let _ = sender
-            .send(Message::Text(
-                json!({"error": "JWT sin rol subscribe"}).to_string(),
-            ))
-            .await;
-        return;
-    }
+    // client_id sigue siendo el identificador de presencia hasta la fase de identidad.
+    let client_id = claims.sub.clone();
 
     let tx = match state.channel_manager.subscribe(
         &effective_id,
@@ -172,11 +145,7 @@ async fn handle_socket(
     }
 
     // Si el JWT expira a mitad de conexión, la cortamos (re-autenticación periódica).
-    let jwt_exp = if claims.jti == "svc" {
-        i64::MAX
-    } else {
-        claims.exp
-    };
+    let jwt_exp = claims.exp;
 
     loop {
         // Timeout hasta expiración del JWT para forzar re-auth
@@ -208,7 +177,31 @@ async fn handle_socket(
                     Some(Ok(Message::Text(text))) => {
                         // Solo roles publish pueden emitir por WS
                         if !claims.can_publish() {
+                            let _ = sender
+                                .send(Message::Text(
+                                    json!({"error": "forbidden: tu rol no permite publicar"}).to_string(),
+                                ))
+                                .await;
                             continue;
+                        }
+                        // Re-verificación de autorización en cada publicación (por si la
+                        // key se revocó/eliminó mientras la conexión seguía abierta).
+                        if authorize_channel_for_jwt(
+                            &state.channel_manager,
+                            &state.keys.pool,
+                            &claims,
+                            &effective_id,
+                            ChannelAction::Publish,
+                        )
+                        .await
+                        .is_err()
+                        {
+                            let _ = sender
+                                .send(Message::Text(
+                                    json!({"error": "forbidden: credencial sin acceso al canal"}).to_string(),
+                                ))
+                                .await;
+                            break;
                         }
                         if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&text) {
                             let event = Event::new(
@@ -235,11 +228,10 @@ async fn handle_socket(
             }
             _ = tokio::time::sleep(timeout_dur), if jwt_exp != i64::MAX => {
                 info!("JWT expirado para {}, cerrando WS (re-auth requerida)", client_id);
-                let _ = sender.send(Message::Text(json!({"error": "token expirado, reconectar"}).to_string(),)).await;
+                let _ = sender.send(Message::Text(json!({"error": "token expirado, reconectar"}).to_string())).await;
                 break;
             }
         }
     }
     state.channel_manager.unsubscribe(&effective_id, &client_id);
-    let _ = StatusCode::OK;
 }

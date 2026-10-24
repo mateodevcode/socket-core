@@ -166,3 +166,51 @@ async fn stats_filtradas_por_proyecto() {
         channels
     );
 }
+
+#[tokio::test]
+async fn canal_ajeno_por_id_uuid_tambien_da_404() {
+    let hub = Hub::start().await;
+    let (_, id_b) = hub.seed_channels().await;
+    // GET by id con key de A
+    let res = hub
+        .client
+        .get(format!("{}/channels/{}", hub.base, id_b))
+        .header("x-api-key", &hub.key_a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        404,
+        "el UUID ajeno no debe filtrar existencia"
+    );
+
+    // clients by id con key de A
+    let res = hub
+        .client
+        .get(format!("{}/channels/{}/clients", hub.base, id_b))
+        .header("x-api-key", &hub.key_a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        404,
+        "clients por UUID ajeno no debe exponerse"
+    );
+}
+
+#[tokio::test]
+async fn emitir_en_canal_ajeno_por_id_uuid_da_404() {
+    let hub = Hub::start().await;
+    let (_, id_b) = hub.seed_channels().await;
+    let res = hub
+        .emit_with_key(
+            &hub.key_a,
+            &id_b,
+            vec!["*".into()],
+            serde_json::json!({"x": 1}),
+        )
+        .await;
+    assert_eq!(res.status(), 404);
+}

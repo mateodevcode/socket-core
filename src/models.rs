@@ -33,16 +33,19 @@ impl Event {
 pub struct Channel {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub project_id: String,
     pub description: Option<String>,
     pub created_at: i64,
     pub clients_count: usize,
 }
 
 impl Channel {
-    pub fn new(name: String, description: Option<String>) -> Self {
+    pub fn new(name: String, project_id: String, description: Option<String>) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
             name,
+            project_id,
             description,
             created_at: chrono::Utc::now().timestamp(),
             clients_count: 0,

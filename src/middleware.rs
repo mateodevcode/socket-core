@@ -1,6 +1,6 @@
 use crate::auth::{bearer_from_header, decode_jwt, Claims, KEY_PREFIX};
 use crate::handlers::AppState;
-use crate::keys::{channel_allowed, has_scope, origin_allowed, ApiKey};
+use crate::keys::{has_scope, origin_allowed, ApiKey};
 use axum::http::{HeaderMap, StatusCode};
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -128,8 +128,9 @@ pub async fn require_api_key(
     Ok(key)
 }
 
-/// Valida JWT Bearer (o ?token=) + revocación + canal/rol.
-/// Si el token empieza con sc_live_ se trata como API key de servicio (puente backend).
+/// Valida JWT Bearer (o ?token=) + revocación de jti.
+/// SIN puente de service-key: una API key `sc_live_...` nunca es un token de WS/Bearer.
+/// Los backends usan REST con `X-Api-Key`; los frontends usan JWT.
 pub async fn require_jwt(
     state: &AppState,
     headers: &HeaderMap,
@@ -138,99 +139,18 @@ pub async fn require_jwt(
     let token = bearer_from_header(headers, query_token)
         .ok_or((StatusCode::UNAUTHORIZED, "falta token Bearer".into()))?;
 
-    // Puente servicio-a-servicio: permite usar la API key cruda como token WS
     if token.starts_with(KEY_PREFIX) {
-        if let Some(key) = state.keys.validate(&token).await {
-            let origin = request_origin(headers);
-            if !origin_allowed(&key, origin.as_deref()) {
-                return Err((StatusCode::FORBIDDEN, "origen no permitido".into()));
-            }
-            return Ok(Claims {
-                sub: format!("svc:{}", key.name),
-                project_id: key.id,
-                project_name: key.name,
-                channel: "*".into(),
-                role: "both".into(),
-                jti: "svc".into(),
-                iat: 0,
-                exp: i64::MAX,
-            });
-        }
-        return Err((StatusCode::UNAUTHORIZED, "service key inválida".into()));
+        // Defensa explícita: una API key cruda no debe usarse como JWT/Bearer/WS.
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "api keys no son tokens: usa X-Api-Key en REST o pide un JWT en /auth/token".into(),
+        ));
     }
 
     let claims = decode_jwt(&state.jwt_secret, &token)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "jwt inválido o expirado".into()))?;
-    if claims.jti != "svc" && state.keys.is_token_revoked(&claims.jti).await {
+    if state.keys.is_token_revoked(&claims.jti).await {
         return Err((StatusCode::UNAUTHORIZED, "token revocado".into()));
     }
     Ok(claims)
-}
-
-/// El JWT autoriza este canal si coincide o si es "*" dentro del prefijo de su proyecto.
-/// Para validar prefijo necesitamos la key original; si el claim viene de una key
-/// eliminada, igual limitamos por channel_prefix guardado en el token? No lo guardamos,
-/// así que re-validamos: el canal del claim debe respetar el prefijo de la key viva.
-/// Si la key ya no existe, solo permitimos si el token es reciente (defensa en profundidad
-/// la hace la expiración corta + revocación).
-pub async fn jwt_can_access_channel(
-    state: &AppState,
-    claims: &Claims,
-    target_channel_id_or_name: &str,
-    channel_name_lookup: Option<&str>,
-) -> bool {
-    // Puente servicio: acceso total (ya validó key)
-    if claims.jti == "svc" {
-        return true;
-    }
-    // Si el JWT está acotado a un canal concreto, debe coincidir (por id o nombre)
-    if claims.channel != "*" {
-        if claims.channel == target_channel_id_or_name {
-            return true;
-        }
-        if let Some(n) = channel_name_lookup {
-            if claims.channel == n || claims.channel == target_channel_id_or_name {
-                return true;
-            }
-        }
-        // Soporte "prefijo:*" dentro del propio JWT
-        if claims.channel.ends_with(":*") {
-            let p = &claims.channel[..claims.channel.len() - 2];
-            if target_channel_id_or_name.starts_with(p)
-                || channel_name_lookup
-                    .map(|n| n.starts_with(p))
-                    .unwrap_or(false)
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-    // JWT wildcard: verificar contra el prefijo vivo de la key
-    let row = sqlx::query_as::<_, (String,)>("SELECT channel_prefix FROM api_keys WHERE id = ?")
-        .bind(&claims.project_id)
-        .fetch_optional(&state.keys.pool)
-        .await
-        .ok()
-        .flatten();
-    let Some((prefix_s,)) = row else { return false };
-    let tmp = crate::keys::ApiKey {
-        id: claims.project_id.clone(),
-        name: claims.project_name.clone(),
-        domains: vec!["*".into()],
-        channel_prefixes: prefix_s
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect(),
-        scopes: vec![],
-        rate_limit_per_min: 0,
-        expires_at: None,
-        revoked: false,
-        created_at: 0,
-    };
-    channel_allowed(&tmp, target_channel_id_or_name)
-        || channel_name_lookup
-            .map(|n| channel_allowed(&tmp, n))
-            .unwrap_or(false)
 }

@@ -363,7 +363,9 @@ fn host_of(url_or_origin: &str) -> String {
         .to_string()
 }
 
-/// Canal permitido: prefixes ["*"] o ["monitoreo:*","jarvis:*"] o exactos.
+/// Canal permitido: prefixes ["*"] o ["a:*","jarvis:*"] o exactos.
+/// Estricto: "a:*" NO acepta "a" (sin segmento), "a:" (segmento vacío),
+/// "a2:x" (otro prefijo) ni "A:x" (mayúsculas).
 pub fn channel_allowed(key: &ApiKey, channel: &str) -> bool {
     for p in &key.channel_prefixes {
         if p == "*" {
@@ -371,8 +373,16 @@ pub fn channel_allowed(key: &ApiKey, channel: &str) -> bool {
         }
         if p.ends_with(":*") {
             let prefix = &p[..p.len() - 2];
-            if channel == prefix || channel.starts_with(&format!("{}:", prefix)) {
-                return true;
+            if prefix.is_empty() {
+                continue; // ":*" no es un prefijo válido
+            }
+            if let Some(suffix) = channel.strip_prefix(prefix) {
+                // debe seguir el separador ':' y un segmento no vacío
+                if let Some(sfx) = suffix.strip_prefix(':') {
+                    if !sfx.is_empty() {
+                        return true;
+                    }
+                }
             }
         } else if p == channel {
             return true;
@@ -426,5 +436,17 @@ mod tests {
         assert!(channel_allowed(&k("*", "*", "*"), "cualquiera"));
         assert!(!has_scope(&key, "manage"));
         assert!(has_scope(&key, "publish"));
+    }
+
+    #[test]
+    fn policies_estrictas_de_prefijo() {
+        let key = k("*", "a:*", "publish,subscribe");
+        assert!(channel_allowed(&key, "a:x"));
+        assert!(!channel_allowed(&key, "a2:x")); // otro prefijo
+        assert!(!channel_allowed(&key, "a")); // sin segmento
+        assert!(!channel_allowed(&key, "A:x")); // mayúsculas
+        assert!(!channel_allowed(&key, "a:")); // segmento vacío
+        assert!(!channel_allowed(&key, "x:a")); // prefijo al final
+        assert!(!channel_allowed(&key, "aa:x")); // prefijo pegado
     }
 }

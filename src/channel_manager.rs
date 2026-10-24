@@ -27,6 +27,7 @@ impl ChannelManager {
 
     pub fn create_channel(
         &self,
+        project_id: String,
         name: String,
         description: Option<String>,
     ) -> Result<Channel, String> {
@@ -38,7 +39,7 @@ impl ChannelManager {
             return Err(format!("Channel '{}' already exists", name));
         }
 
-        let channel = Channel::new(name, description);
+        let channel = Channel::new(name, project_id, description);
         let (tx, _) = broadcast::channel(1000);
 
         self.channels.insert(
@@ -50,14 +51,38 @@ impl ChannelManager {
             },
         );
 
-        info!("Channel created: {}", channel.id);
+        info!(
+            "Channel created: {} (project={})",
+            channel.id, channel.project_id
+        );
         Ok(channel)
+    }
+
+    /// Resuelve un canal por id O por nombre (los clientes usan el nombre, los
+    /// backends el id). Es la única puerta de entrada para referenciar canales.
+    pub fn resolve_channel(&self, channel_id_or_name: &str) -> Option<Channel> {
+        if let Some(v) = self.channels.get(channel_id_or_name) {
+            return Some(v.value().channel.clone());
+        }
+        self.channels
+            .iter()
+            .find(|e| e.value().channel.name == channel_id_or_name)
+            .map(|e| e.value().channel.clone())
     }
 
     pub fn get_channel(&self, channel_id: &str) -> Option<Channel> {
         self.channels
             .get(channel_id)
             .map(|entry| entry.value().channel.clone())
+    }
+
+    /// Canales VISIBLES para un proyecto (dueño). Los ajenos ni aparecen.
+    pub fn list_channels_for(&self, project_id: &str) -> Vec<Channel> {
+        self.channels
+            .iter()
+            .map(|entry| entry.value().channel.clone())
+            .filter(|c| c.project_id == project_id)
+            .collect()
     }
 
     pub fn list_channels(&self) -> Vec<Channel> {
@@ -151,6 +176,19 @@ impl ChannelManager {
         (channels, total_clients)
     }
 
+    /// Stats VISIBLES para un proyecto: cuenta solo sus canales y sus clientes.
+    pub fn stats_for(&self, project_id: &str) -> (usize, usize) {
+        let mut channels = 0usize;
+        let mut total_clients = 0usize;
+        for entry in self.channels.iter() {
+            if entry.value().channel.project_id == project_id {
+                channels += 1;
+                total_clients += entry.value().clients.len();
+            }
+        }
+        (channels, total_clients)
+    }
+
     /// Elimina el canal de memoria. Los suscritos activos se desconectan solos
     /// (el broadcast se cierra al caer el último Sender).
     pub fn remove_channel(&self, channel_id: &str) -> bool {
@@ -160,11 +198,12 @@ impl ChannelManager {
     /// Guarda/actualiza el registro del canal en SQLite (los clientes no se persisten).
     pub async fn persist(&self, pool: &sqlx::SqlitePool, ch: &Channel) {
         let _ = sqlx::query(
-            "INSERT INTO channels (id, name, description, created_at) VALUES (?,?,?,?)
-             ON CONFLICT(id) DO UPDATE SET name=excluded.name, description=excluded.description",
+            "INSERT INTO channels (id, name, project_id, description, created_at) VALUES (?,?,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET name=excluded.name, project_id=excluded.project_id, description=excluded.description",
         )
         .bind(&ch.id)
         .bind(&ch.name)
+        .bind(&ch.project_id)
         .bind(&ch.description)
         .bind(ch.created_at)
         .execute(pool)
@@ -174,14 +213,14 @@ impl ChannelManager {
     /// Recarga en memoria los canales persistidos (con broadcast y clientes frescos).
     /// Los IDs se conservan, así que los JWT atados a un canal siguen valiendo tras reinicios.
     pub async fn load_persisted(&self, pool: &sqlx::SqlitePool) -> usize {
-        let rows = sqlx::query_as::<_, (String, String, Option<String>, i64)>(
-            "SELECT id, name, description, created_at FROM channels",
+        let rows = sqlx::query_as::<_, (String, String, String, Option<String>, i64)>(
+            "SELECT id, name, project_id, description, created_at FROM channels",
         )
         .fetch_all(pool)
         .await
         .unwrap_or_default();
         let mut n = 0;
-        for (id, name, description, created_at) in rows {
+        for (id, name, project_id, description, created_at) in rows {
             if self.channels.contains_key(&id) {
                 continue;
             }
@@ -192,6 +231,7 @@ impl ChannelManager {
                     channel: Channel {
                         id,
                         name,
+                        project_id,
                         description,
                         created_at,
                         clients_count: 0,
