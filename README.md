@@ -77,7 +77,8 @@ Solo el administrador del core hace esto, **una vez por proyecto**. La `api_key`
 
 ```bash
 MASTER_KEY=$(grep ^MASTER_KEY= .env | cut -d= -f2)
-curl -X POST $CORE/admin/keys \
+ADMIN=http://127.0.0.1:3005   # /admin/* SOLO por localhost (bloqueado desde internet)
+curl -X POST $ADMIN/admin/keys \
   -H "X-Master-Key: $MASTER_KEY" -H "Content-Type: application/json" -d '{
     "name": "demo",
     "domains": ["https://panel.midominio.com"],
@@ -227,18 +228,25 @@ curl $CORE/channels -H "X-Api-Key: $RAW"              # lista de canales
 curl $CORE/channels/$CH/clients -H "X-Api-Key: $RAW"  # clientes conectados al canal
 ```
 
-### Paso 8 — Revocar (requiere `MASTER_KEY`)
+### Paso 8 — Administrar keys (requiere `MASTER_KEY`, SOLO por localhost)
 
 ```bash
+ADMIN=http://127.0.0.1:3005   # /admin/* está bloqueado desde internet (Nginx solo-localhost)
+# Editar una key: solo lo enviado, aplica al instante sin reiniciar
+curl -X PATCH $ADMIN/admin/keys/<KEY_ID> \
+  -H "X-Master-Key: $MASTER_KEY" -H "Content-Type: application/json" \
+  -d '{"rate_limit_per_min":3000}'
+# Campos editables: name, domains, channel_prefix, scopes, rate_limit_per_min,
+#   expires_in_days (días desde hoy; 0 = quitar expiración; omitido = no tocar)
 # Quitar acceso a un PROYECTO entero (efecto inmediato)
-curl -X POST $CORE/admin/keys/<KEY_ID>/revoke -H "X-Master-Key: $MASTER_KEY"
+curl -X POST $ADMIN/admin/keys/<KEY_ID>/revoke -H "X-Master-Key: $MASTER_KEY"
 # Borrar la key definitivamente
-curl -X DELETE $CORE/admin/keys/<KEY_ID> -H "X-Master-Key: $MASTER_KEY"
+curl -X DELETE $ADMIN/admin/keys/<KEY_ID> -H "X-Master-Key: $MASTER_KEY"
 # Revocar un JWT concreto (sácale el jti decodificando el payload base64)
-curl -X POST "$CORE/admin/tokens/revoke?jti=<JTI>" \
+curl -X POST "$ADMIN/admin/tokens/revoke?jti=<JTI>" \
   -H "X-Master-Key: $MASTER_KEY" -H "Content-Type: application/json" -d '{}'
 # Ver todas las keys (sin exponer los secretos, solo metadatos)
-curl $CORE/admin/keys -H "X-Master-Key: $MASTER_KEY"
+curl $ADMIN/admin/keys -H "X-Master-Key: $MASTER_KEY"
 ```
 
 ---

@@ -33,7 +33,8 @@ jobs:
 
             echo "→ Descartando cambios locales no versionados..."
             git reset --hard HEAD
-            git clean -fd
+            # -e = exclusiones explícitas: ni aunque falle el .gitignore se tocan.
+            git clean -fd -e proyectos/ -e .env -e data/
 
             echo "→ Restaurando .env y base de keys..."
             cp /tmp/socket-core.env.bak .env 2>/dev/null || true
