@@ -65,7 +65,11 @@ async fn jwt_subscribe_no_puede_publicar_ws() {
     let respuesta_pub = common::next_text(&mut pub_conn, std::time::Duration::from_secs(2)).await;
     let hay_error = respuesta_pub
         .as_ref()
-        .map(|v| v.get("error").or_else(|| v.get("payload")).is_some())
+        .map(|v| {
+            v.get("error").is_some()
+                || v.get("type").and_then(|t| t.as_str()) == Some("error")
+                || v.get("payload").is_some()
+        })
         .unwrap_or(false);
     assert!(
         hay_error,

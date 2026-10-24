@@ -49,13 +49,49 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
    identidad es el `sub` del JWT). Frontends que elegían `client_id` propio ya no
    controlan su identidad de presencia.
 
+
+### FASE 3 — Identidad y mensajes
+
+#### Cambios incompatibles
+
+1. **La identidad la fija el backend, no el cliente.** El `client_id` del handshake WS
+   se ignora por completo. La identidad de usuario es el `sub` del JWT (lo pone el
+   backend del proyecto al pedir el token) y cada conexión recibe un `connection_id`
+   propio generado por el servidor.
+   - Antes: el cliente elegía `client_id` y con él se definían targets y presencia.
+   - Ahora: targets y presencia usan `sub`; un usuario puede tener N conexiones
+     simultáneas sin pisarse. Cerrar una no afecta a las demás.
+   - Migración: en el backend, fija `user_id` (→ `sub`) al pedir `/auth/token`; en el
+     frontend, envía solo `{"channel": "...", "device": "opcional"}` en el handshake.
+
+2. **`source` de publicaciones WS lo impone el servidor**: `"<proyecto>:<sub>"`.
+   Ya no se puede falsificar el origen de un evento desde el cliente.
+
+3. **Eventos de sistema reservados.** `source="__system__"` (REST → 400) y los tipos
+   `client_joined`, `client_left`, `missed_events` (REST → 400; WS → error
+   `invalid_payload`) only los emite el servidor.
+
+4. **Límites de payload**: 64 KB por payload/frame WS, profundidad JSON ≤ 16,
+   targets ≤ 50 y ≤ 128 caracteres cada uno. Los WS que superen 64 KB se cierran con
+   `{"type":"error","code":"message_too_large"}`.
+
+5. **Envelope de error WS estable**: `{"type":"error","code":"...","detail":"..."}` con
+   códigos `forbidden`, `invalid_payload`, `message_too_large`, `token_expired`.
+   Los clientes que miraban el campo `error` deben leer `type`/`code`.
+
+6. **Forma de presencia/sistema**: los eventos `client_joined`/`client_left` llevan
+   `user`, `connection_id`, `clients` (array de objetos) y `total_clients`; el REST
+   `/channels/:id/clients` devuelve `id` (=sub), `connection_id`, `device`,
+   `client_type`, `project`, `connected_at`. La presencia solo es visible para el
+   proyecto dueño del canal (404 para el resto).
+
 ### Nota de estado
 
 - La comprobación de revocación de jti ante fallo de DB sigue siendo fail-open;
   el modo fail-closed y el corte activo de conexiones llegan con la fase de
   ciclo de vida (4).
 - La suite de integración en `tests/` define el comportamiento objetivo: los
-  tests aún en rojo corresponden a fases 3-5 (identidad, límites, secretos).
+  tests aún en rojo corresponden a fases 4-5 (límites de recursos, red/secretos).
 
 #### Mantener en mente (no incompatible)
 

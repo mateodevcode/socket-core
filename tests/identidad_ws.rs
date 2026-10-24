@@ -212,3 +212,153 @@ async fn source_system_y_tipos_de_sistema_reservados() {
         }
     }
 }
+
+#[tokio::test]
+async fn ws_sobrescribe_source_con_identidad_real() {
+    let hub = Hub::start().await;
+    hub.seed_channels().await;
+    let autor_jwt = hub.mint_jwt(Project::A, "user-1", "a:chat", "both").await;
+    let peer_jwt = hub
+        .mint_jwt(Project::A, "user-2", "a:chat", "subscribe")
+        .await;
+    let mut peer = hub.ws_open(&peer_jwt, "a:chat").await.expect("peer");
+    let mut autor = hub.ws_open(&autor_jwt, "a:chat").await.expect("autor");
+
+    autor
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::json!({"type": "chat", "source": "evil", "text": "hola"}).to_string(),
+        ))
+        .await
+        .expect("send");
+
+    let mut source_visto: Option<String> = None;
+    for _ in 0..6 {
+        if let Some(v) = common::next_text(&mut peer, std::time::Duration::from_secs(2)).await {
+            if v["payload"]["type"] == "chat" {
+                source_visto = v["source"].as_str().map(|s| s.to_string());
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        source_visto.as_deref(),
+        Some("proj-a:user-1"),
+        "el servidor debe imponer source=proyecto:usuario"
+    );
+}
+
+#[tokio::test]
+async fn rest_rechaza_payload_grande_targets_excesivos_y_profundidad() {
+    let hub = Hub::start().await;
+    let id_a = hub.create_channel_ok(Project::A, "a:chat").await;
+
+    // Payload > 64 KB
+    let grande = serde_json::json!({"type": "chat", "text": "x".repeat(70 * 1024)});
+    let res = hub
+        .emit_with_key(&hub.key_a, &id_a, vec!["*".into()], grande)
+        .await;
+    assert_eq!(res.status(), 400, "payload > 64KB debe rechazarse");
+
+    // Demasiados targets (max 50)
+    let targets: Vec<String> = (0..51).map(|i| format!("user-{}", i)).collect();
+    let res = hub
+        .emit_with_key(
+            &hub.key_a,
+            &id_a,
+            targets,
+            serde_json::json!({"type": "chat"}),
+        )
+        .await;
+    assert_eq!(res.status(), 400, "targets > 50 debe rechazarse");
+
+    // Profundidad > 16
+    let mut deep = serde_json::json!("fondo");
+    for _ in 0..20 {
+        deep = serde_json::json!([deep]);
+    }
+    let res = hub
+        .emit_with_key(&hub.key_a, &id_a, vec!["*".into()], deep)
+        .await;
+    assert_eq!(
+        res.status(),
+        400,
+        "payload demasiado profundo debe rechazarse"
+    );
+
+    // Tipo de sistema por REST
+    let res = hub
+        .emit_with_key(
+            &hub.key_a,
+            &id_a,
+            vec!["*".into()],
+            serde_json::json!({"type": "client_left"}),
+        )
+        .await;
+    assert_eq!(res.status(), 400, "tipo de sistema debe rechazarse");
+}
+
+#[tokio::test]
+async fn cada_conexion_tiene_connection_id_y_cerrar_una_no_afecta_a_la_otra() {
+    let hub = Hub::start().await;
+    hub.seed_channels().await;
+    let jwt = hub
+        .mint_jwt(Project::A, "user-1", "a:chat", "subscribe")
+        .await;
+    let mut c1 = hub.ws_open(&jwt, "a:chat").await.expect("c1");
+    let mut c2 = hub.ws_open(&jwt, "a:chat").await.expect("c2");
+
+    // Dos entradas con connection_id distintos para el mismo usuario.
+    let res = hub.get_clients(&hub.key_a, "a:chat").await;
+    let v: Value = res.json().await.unwrap();
+    let list = v["data"].as_array().expect("array").clone();
+    assert_eq!(list.len(), 2, "dos conexiones => dos entradas");
+    let ids: Vec<&str> = list
+        .iter()
+        .filter_map(|c| c["connection_id"].as_str())
+        .collect();
+    assert_eq!(ids.len(), 2);
+    assert!(
+        ids[0] != ids[1],
+        "connection_id debe ser único por conexión"
+    );
+    assert!(ids.iter().all(|i| !i.is_empty()));
+    assert!(list.iter().all(|c| c["id"] == "user-1"), "identidad = sub");
+
+    // Cerrar c1: c2 sigue vivo y la presencia baja a 1.
+    use futures_util::SinkExt;
+    c1.send(tokio_tungstenite::tungstenite::Message::Close(None))
+        .await
+        .expect("close c1");
+    let mut count = 2usize;
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let res = hub.get_clients(&hub.key_a, "a:chat").await;
+        let v: Value = res.json().await.unwrap();
+        count = v["data"].as_array().map(|a| a.len()).unwrap_or(0);
+        if count == 1 {
+            break;
+        }
+    }
+    assert_eq!(count, 1, "cerrar una conexión deja viva la otra");
+
+    // c2 sigue recibiendo mensajes dirigidos al usuario.
+    let res = hub
+        .emit_with_key(
+            &hub.key_a,
+            "a:chat",
+            vec!["user-1".into()],
+            serde_json::json!({"type": "chat", "text": "sigue"}),
+        )
+        .await;
+    assert_eq!(res.status(), 200);
+    let mut recibido = false;
+    for _ in 0..5 {
+        if let Some(v) = common::next_text(&mut c2, std::time::Duration::from_secs(2)).await {
+            if v["payload"]["text"] == "sigue" {
+                recibido = true;
+                break;
+            }
+        }
+    }
+    assert!(recibido, "la conexión restante sigue recibiendo");
+}

@@ -92,10 +92,15 @@ impl ChannelManager {
             .collect()
     }
 
+    /// Suscribe una CONEXIÓN (identificada por connection_id generado por el servidor).
+    /// `user_id` es la identidad del usuario (sub del JWT); puede repetirse.
+    #[allow(clippy::too_many_arguments)]
     pub fn subscribe(
         &self,
         channel_id: &str,
-        client_id: String,
+        user_id: String,
+        connection_id: String,
+        device: Option<String>,
         client_type: ClientType,
         project: String,
     ) -> Result<ChannelBroadcast, String> {
@@ -105,47 +110,65 @@ impl ChannelManager {
             .ok_or("Channel not found")?;
 
         let client_info = ClientInfo {
-            id: client_id.clone(),
+            id: user_id.clone(),
+            connection_id: connection_id.clone(),
+            device,
             client_type,
             project,
             connected_at: chrono::Utc::now().timestamp(),
         };
 
-        channel_data.clients.insert(client_id.clone(), client_info);
+        channel_data
+            .clients
+            .insert(connection_id.clone(), client_info);
         channel_data.channel.clients_count = channel_data.clients.len();
 
-        info!("Client {} subscribed to channel {}", client_id, channel_id);
+        info!(
+            "Client {} (conn {}) subscribed to channel {}",
+            user_id, connection_id, channel_id
+        );
         Ok(channel_data.tx.clone())
     }
 
-    pub fn unsubscribe(&self, channel_id: &str, client_id: &str) {
+    /// Elimina UNA conexión (connection_id) y notifica la salida.
+    pub fn unsubscribe(&self, channel_id: &str, connection_id: &str) {
+        let mut left: Option<(String, Vec<ClientInfo>, usize)> = None;
         if let Some(mut channel_data) = self.channels.get_mut(channel_id) {
-            channel_data.clients.remove(client_id);
+            let user = channel_data
+                .clients
+                .remove(connection_id)
+                .map(|(_, info)| info.id)
+                .unwrap_or_default();
             channel_data.channel.clients_count = channel_data.clients.len();
 
             info!(
-                "Client {} unsubscribed from channel {}",
-                client_id, channel_id
+                "Client {} (conn {}) unsubscribed from channel {}",
+                user, connection_id, channel_id
             );
 
-            let clients_list: Vec<String> = channel_data
+            let clients: Vec<ClientInfo> = channel_data
                 .clients
                 .iter()
-                .map(|entry| entry.key().clone())
+                .map(|entry| entry.value().clone())
                 .collect();
-
-            let leave_event = Event::new(
-                channel_id.to_string(),
-                "__system__".to_string(),
-                vec!["*".to_string()],
-                json!({
-                    "type": "client_left",
-                    "client_id": client_id,
-                    "clients": clients_list,
-                    "total_clients": channel_data.clients.len()
-                }),
-            );
-            let _ = channel_data.tx.send(leave_event);
+            left = Some((user, clients, channel_data.clients.len()));
+        }
+        if let Some((user, clients, total)) = left {
+            if let Some(channel_data) = self.channels.get(channel_id) {
+                let leave_event = Event::new(
+                    channel_id.to_string(),
+                    crate::models::SYSTEM_SOURCE.to_string(),
+                    vec!["*".to_string()],
+                    json!({
+                        "type": "client_left",
+                        "user": user,
+                        "connection_id": connection_id,
+                        "clients": clients,
+                        "total_clients": total
+                    }),
+                );
+                let _ = channel_data.tx.send(leave_event);
+            }
         }
     }
 

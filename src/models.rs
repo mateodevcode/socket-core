@@ -29,6 +29,92 @@ impl Event {
     }
 }
 
+pub const SYSTEM_SOURCE: &str = "__system__";
+pub const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
+pub const MAX_PAYLOAD_DEPTH: usize = 16;
+pub const MAX_TARGETS: usize = 50;
+pub const MAX_TARGET_LEN: usize = 128;
+pub const SYSTEM_EVENT_TYPES: &[&str] = &["client_joined", "client_left", "missed_events"];
+
+pub fn is_reserved_event_type(t: &str) -> bool {
+    SYSTEM_EVENT_TYPES.contains(&t)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum EventError {
+    ReservedSource,
+    ReservedType(String),
+    TooManyTargets,
+    TargetTooLong,
+    PayloadTooLarge,
+    PayloadTooDeep,
+}
+
+impl std::fmt::Display for EventError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EventError::ReservedSource => write!(f, "source reservado"),
+            EventError::ReservedType(t) => write!(f, "tipo de evento reservado: {}", t),
+            EventError::TooManyTargets => write!(f, "demasiados targets (max {})", MAX_TARGETS),
+            EventError::TargetTooLong => {
+                write!(f, "target demasiado largo (max {})", MAX_TARGET_LEN)
+            }
+            EventError::PayloadTooLarge => write!(
+                f,
+                "payload demasiado grande (max {} bytes)",
+                MAX_PAYLOAD_BYTES
+            ),
+            EventError::PayloadTooDeep => write!(
+                f,
+                "profundidad de payload excedida (max {})",
+                MAX_PAYLOAD_DEPTH
+            ),
+        }
+    }
+}
+
+impl std::error::Error for EventError {}
+
+/// Valida reglas de salida comunes a REST y WS.
+pub fn validate_outbound(
+    source: &str,
+    targets: &[String],
+    payload: &serde_json::Value,
+) -> Result<(), EventError> {
+    if source == SYSTEM_SOURCE {
+        return Err(EventError::ReservedSource);
+    }
+    if let Some(t) = payload.get("type").and_then(|v| v.as_str()) {
+        if is_reserved_event_type(t) {
+            return Err(EventError::ReservedType(t.to_string()));
+        }
+    }
+    if targets.len() > MAX_TARGETS {
+        return Err(EventError::TooManyTargets);
+    }
+    for t in targets {
+        if t.len() > MAX_TARGET_LEN {
+            return Err(EventError::TargetTooLong);
+        }
+    }
+    let bytes = serde_json::to_vec(payload).map_err(|_| EventError::PayloadTooLarge)?;
+    if bytes.len() > MAX_PAYLOAD_BYTES {
+        return Err(EventError::PayloadTooLarge);
+    }
+    if depth_of(payload) > MAX_PAYLOAD_DEPTH {
+        return Err(EventError::PayloadTooDeep);
+    }
+    Ok(())
+}
+
+fn depth_of(v: &serde_json::Value) -> usize {
+    match v {
+        serde_json::Value::Object(map) => 1 + map.values().map(depth_of).max().unwrap_or(0),
+        serde_json::Value::Array(arr) => 1 + arr.iter().map(depth_of).max().unwrap_or(0),
+        _ => 1,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Channel {
     pub id: String,
@@ -55,9 +141,16 @@ impl Channel {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientInfo {
+    /// Identidad del usuario final: el `sub` del JWT (no la elige el cliente).
     pub id: String,
+    /// Identificador de ESTA conexión, generado por el servidor.
+    /// Un usuario puede tener varias conexiones simultáneas.
+    pub connection_id: String,
+    /// Nombre de dispositivo opcional saneado proveniente del handshake.
+    #[serde(default)]
+    pub device: Option<String>,
     pub client_type: ClientType,
-    /// Proyecto dueño de la conexión (del JWT / service key). Para ver por proyecto.
+    /// Proyecto dueño de la conexión (del JWT). Para ver por proyecto.
     #[serde(default)]
     pub project: String,
     pub connected_at: i64,

@@ -214,6 +214,11 @@ pub async fn emit_event(
     } else {
         req.source
     };
+    // Reglas de salida: source "__system__" y tipos de sistema son del servidor;
+    // targets acotados y payload con tamaño/profundidad máximos.
+    if let Err(e) = crate::models::validate_outbound(&source, &req.targets, &req.payload) {
+        return err(StatusCode::BAD_REQUEST, e.to_string());
+    }
     let event = Event::new(effective_id.clone(), source, req.targets, req.payload);
     match state.channel_manager.emit_event(&effective_id, event) {
         Ok(_) => (

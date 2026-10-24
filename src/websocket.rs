@@ -1,6 +1,6 @@
 use crate::authz::{authorize_channel_for_jwt, AuthzError, ChannelAction};
 use crate::handlers::AppState;
-use crate::models::{ClientType, Event};
+use crate::models::{validate_outbound, ClientType, Event, MAX_PAYLOAD_BYTES, SYSTEM_SOURCE};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -42,35 +42,52 @@ pub async fn websocket_handler(
     }
 }
 
+/// Sanea un nombre de dispositivo opcional: trim, máx 64 caracteres, sin controles.
+fn sanitize_device(raw: Option<&str>) -> Option<String> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let clean: String = raw.chars().filter(|c| !c.is_control()).take(64).collect();
+    if clean.is_empty() {
+        None
+    } else {
+        Some(clean)
+    }
+}
+
 async fn handle_socket(socket: WebSocket, state: AppState, claims: crate::auth::Claims) {
     let (mut sender, mut receiver) = socket.split();
 
-    // Handshake: { "channel": "<id o nombre>" } — la identidad NO la declara el cliente
-    // (viene del JWT; en la fase de identidad se elimina client_id del protocolo).
-    let channel_ref = match receiver.next().await {
+    // Handshake: { "channel": "<id o nombre>", "device": "<opcional>" }.
+    // La identidad NO la declara el cliente: es el `sub` del JWT.
+    let (channel_ref, device) = match receiver.next().await {
         Some(Ok(msg)) => {
-            if let Ok(text) = msg.to_text() {
-                match serde_json::from_str::<serde_json::Value>(text) {
-                    Ok(obj) => match obj.get("channel").and_then(|v| v.as_str()) {
-                        Some(c) if !c.trim().is_empty() => c.to_string(),
-                        _ => {
-                            let _ = sender
-                                .send(Message::Text(
-                                    json!({"error": "falta el canal en el handshake"}).to_string(),
-                                ))
-                                .await;
-                            return;
-                        }
-                    },
-                    _ => {
-                        let _ = sender
-                            .send(Message::Text(json!({"error": "Invalid JSON"}).to_string()))
-                            .await;
-                        return;
-                    }
-                }
-            } else {
+            let Some(text) = msg.to_text().ok() else {
                 return;
+            };
+            let obj: serde_json::Value = match serde_json::from_str(text) {
+                Ok(v) => v,
+                Err(_) => {
+                    let _ = sender
+                        .send(Message::Text(json!({"error": "Invalid JSON"}).to_string()))
+                        .await;
+                    return;
+                }
+            };
+            match obj.get("channel").and_then(|v| v.as_str()) {
+                Some(c) if !c.trim().is_empty() => (
+                    c.to_string(),
+                    sanitize_device(obj.get("device").and_then(|v| v.as_str())),
+                ),
+                _ => {
+                    let _ = sender
+                        .send(Message::Text(
+                            json!({"error": "falta el canal en el handshake"}).to_string(),
+                        ))
+                        .await;
+                    return;
+                }
             }
         }
         _ => return,
@@ -109,12 +126,15 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: crate::auth::
         }
     };
 
-    // client_id sigue siendo el identificador de presencia hasta la fase de identidad.
-    let client_id = claims.sub.clone();
+    // Identidad del usuario = sub del JWT. connection_id lo genera el servidor.
+    let user_id = claims.sub.clone();
+    let connection_id = uuid::Uuid::new_v4().to_string();
 
     let tx = match state.channel_manager.subscribe(
         &effective_id,
-        client_id.clone(),
+        user_id.clone(),
+        connection_id.clone(),
+        device.clone(),
         ClientType::WebSocket,
         claims.project_name.clone(),
     ) {
@@ -128,18 +148,24 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: crate::auth::
     };
 
     info!(
-        "WS client {} (sub={} proj={}) -> {}",
-        client_id, claims.sub, claims.project_name, effective_id
+        "WS user {} (conn {}) proj={} -> {}",
+        user_id, connection_id, claims.project_name, effective_id
     );
     let mut rx = tx.subscribe();
 
+    // Presencia inicial: solo dentro del canal/proyecto (no se expone fuera).
     if let Some(clients) = state.channel_manager.get_clients(&effective_id) {
-        let clients_list: Vec<String> = clients.iter().map(|c| c.id.clone()).collect();
         let join_event = Event::new(
             effective_id.clone(),
-            "__system__".to_string(),
+            SYSTEM_SOURCE.to_string(),
             vec!["*".to_string()],
-            json!({ "type": "client_joined", "client_id": client_id, "clients": clients_list, "total_clients": clients.len() }),
+            json!({
+                "type": "client_joined",
+                "user": user_id,
+                "connection_id": connection_id,
+                "clients": clients,
+                "total_clients": clients.len()
+            }),
         );
         let _ = tx.send(join_event);
     }
@@ -157,7 +183,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: crate::auth::
             result = rx.recv() => {
                 match result {
                     Ok(event) => {
-                        let should_receive = event.targets.contains(&"*".to_string()) || event.targets.contains(&client_id);
+                        // Los targets se refieren a USUARIOS (sub), nunca a un id declarado.
+                        let should_receive = event.targets.iter().any(|t| t == "*" || t == &user_id);
                         if should_receive {
                             if let Ok(json_str) = serde_json::to_string(&event) {
                                 if let Err(e) = sender.send(Message::Text(json_str)).await {
@@ -166,7 +193,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: crate::auth::
                                 }
                             }
                         } else {
-                            debug!("Event for {:?} received but not for client {}", event.targets, client_id);
+                            debug!("Event for {:?} received but not for user {}", event.targets, user_id);
                         }
                     }
                     Err(_) => { debug!("Channel broadcast closed"); break; }
@@ -175,11 +202,20 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: crate::auth::
             msg = receiver.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        // Solo roles publish pueden emitir por WS
+                        // Tope de frame/payload (64 KB). Cierra la conexión si lo supera.
+                        if text.len() > MAX_PAYLOAD_BYTES {
+                            let _ = sender
+                                .send(Message::Text(
+                                    json!({"type": "error", "code": "message_too_large"}).to_string(),
+                                ))
+                                .await;
+                            break;
+                        }
+                        // Solo roles publish pueden emitir por WS.
                         if !claims.can_publish() {
                             let _ = sender
                                 .send(Message::Text(
-                                    json!({"error": "forbidden: tu rol no permite publicar"}).to_string(),
+                                    json!({"type": "error", "code": "forbidden", "detail": "tu rol no permite publicar"}).to_string(),
                                 ))
                                 .await;
                             continue;
@@ -198,25 +234,57 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: crate::auth::
                         {
                             let _ = sender
                                 .send(Message::Text(
-                                    json!({"error": "forbidden: credencial sin acceso al canal"}).to_string(),
+                                    json!({"type": "error", "code": "forbidden", "detail": "credencial sin acceso al canal"}).to_string(),
                                 ))
                                 .await;
                             break;
                         }
-                        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&text) {
-                            let event = Event::new(
-                                effective_id.clone(),
-                                client_id.clone(),
-                                vec!["*".to_string()],
-                                payload,
-                            );
-                            if let Err(e) = state.channel_manager.emit_event(&effective_id, event) {
-                                error!("Error emitiendo evento: {}", e);
+                        let payload: serde_json::Value = match serde_json::from_str(&text) {
+                            Ok(v) => v,
+                            Err(_) => {
+                                let _ = sender
+                                    .send(Message::Text(
+                                        json!({"type": "error", "code": "invalid_payload"}).to_string(),
+                                    ))
+                                    .await;
+                                continue;
                             }
+                        };
+                        // Targets opcionales del payload (a usuarios); por defecto "*".
+                        let mut targets = vec!["*".to_string()];
+                        if let Some(arr) = payload.get("targets").and_then(|v| v.as_array()) {
+                            let parsed: Option<Vec<String>> = arr
+                                .iter()
+                                .map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect();
+                            if let Some(t) = parsed {
+                                targets = t;
+                            } else {
+                                let _ = sender
+                                    .send(Message::Text(
+                                        json!({"type": "error", "code": "invalid_payload", "detail": "targets debe ser lista de strings"}).to_string(),
+                                    ))
+                                    .await;
+                                continue;
+                            }
+                        }
+                        // El servidor impone source y bloquea tipos de sistema.
+                        let source = format!("{}:{}", claims.project_name, claims.sub);
+                        if let Err(e) = validate_outbound(&source, &targets, &payload) {
+                            let _ = sender
+                                .send(Message::Text(
+                                    json!({"type": "error", "code": "invalid_payload", "detail": e.to_string()}).to_string(),
+                                ))
+                                .await;
+                            continue;
+                        }
+                        let event = Event::new(effective_id.clone(), source, targets, payload);
+                        if let Err(e) = state.channel_manager.emit_event(&effective_id, event) {
+                            error!("Error emitiendo evento: {}", e);
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => {
-                        info!("Client {} disconnected", client_id);
+                        info!("Client {} (conn {}) disconnected", user_id, connection_id);
                         break;
                     }
                     Some(Err(e)) => {
@@ -227,11 +295,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: crate::auth::
                 }
             }
             _ = tokio::time::sleep(timeout_dur), if jwt_exp != i64::MAX => {
-                info!("JWT expirado para {}, cerrando WS (re-auth requerida)", client_id);
-                let _ = sender.send(Message::Text(json!({"error": "token expirado, reconectar"}).to_string())).await;
+                info!("JWT expirado para {}, cerrando WS (re-auth requerida)", user_id);
+                let _ = sender.send(Message::Text(json!({"type": "error", "code": "token_expired", "detail": "reconecta con un token nuevo"}).to_string())).await;
                 break;
             }
         }
     }
-    state.channel_manager.unsubscribe(&effective_id, &client_id);
+    state
+        .channel_manager
+        .unsubscribe(&effective_id, &connection_id);
 }
