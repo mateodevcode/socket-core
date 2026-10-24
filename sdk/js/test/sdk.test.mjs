@@ -464,3 +464,54 @@ test("close() limpia timers y no deja reconexiones", { timeout: 20000 }, async (
     await hub.cleanup();
   }
 });
+
+// ---------- S1: errores no fatales tras ready ----------
+
+test("subscribe-only: publish denegado => publish_error y conexión viva", { timeout: 25000 }, async () => {
+  const hub = await setupHub();
+  const sdk = connect({
+    url: `ws://127.0.0.1:${hub.port}/ws`,
+    channel: CHANNEL,
+    tokenProvider: async () => {
+      const j = await hub.mint("user-sub", "subscribe");
+      return { token: j.data.token, expires_in: j.data.expires_in };
+    },
+  });
+  const statuses = [];
+  const errores = [];
+  const mensajes = [];
+  sdk.on("status", (s) => statuses.push(s));
+  sdk.on("publish_error", (e) => errores.push(e));
+  sdk.on("message", (m) => mensajes.push(m));
+  try {
+    await waitStatus(sdk, "connected");
+    await sdk.publish({ type: "chat", text: "no debo poder" });
+    const ok = await waitFor(() => errores.some((e) => e.code === "forbidden"), 5000);
+    assert.ok(ok, `debe emitir publish_error forbidden: ${JSON.stringify(errores)}`);
+    assert.equal(sdk.status, "connected", "la conexión NO debe cerrarse");
+    await hub.emit({ type: "chat", text: "sigo-vivo" });
+    const recibido = await waitFor(() => mensajes.some((m) => m.payload?.text === "sigo-vivo"), 5000);
+    assert.ok(recibido, "debe seguir recibiendo tras el error");
+  } finally {
+    sdk.close();
+    await hub.cleanup();
+  }
+});
+
+test("targets inválidos => invalid_payload no cierra la conexión", { timeout: 25000 }, async () => {
+  const hub = await setupHub();
+  const sdk = clientSdk(hub, "user-invalid");
+  const errores = [];
+  sdk.on("publish_error", (e) => errores.push(e));
+  try {
+    await waitStatus(sdk, "connected");
+    await sdk.publish({ type: "chat", targets: [1] });
+    const ok = await waitFor(() => errores.some((e) => e.code === "invalid_payload"), 5000);
+    assert.ok(ok, `debe emitir publish_error invalid_payload: ${JSON.stringify(errores)}`);
+    assert.equal(sdk.status, "connected", "la conexión sigue viva");
+  } finally {
+    sdk.close();
+    await hub.cleanup();
+  }
+});
+

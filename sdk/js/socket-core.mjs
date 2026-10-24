@@ -275,6 +275,15 @@ export function connect(options = {}) {
         scheduleRenewalRetry();
         return;
       }
+      // Errores de PUBLISH con la conexión ya establecida: se notifican y la
+      // conexión sigue viva (no son fallos de credencial/canal).
+      if (
+        sock.ready &&
+        (code === "forbidden" || code === "invalid_payload" || code === "message_too_large")
+      ) {
+        emit("publish_error", { code, detail: msg.detail });
+        return;
+      }
       handleServerError(code, msg.detail);
       return;
     }
