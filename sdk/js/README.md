@@ -18,17 +18,14 @@ conexión, handshake, renovación y reconexión.
 ## Uso
 
 ```js
-import { connect } from "./socket-core.mjs";
+import { connect, tokenFromEndpoint } from "./socket-core.mjs";
 
 const sc = connect({
   url: "wss://hub.ejemplo.com",     // o https://host (se convierte); default /ws
   channel: "demo:chat",
   device: "web",                     // opcional (se sanea)
-  tokenProvider: async () => {       // LO IMPLEMENTA TU BACKEND
-    const r = await fetch("/socket-token", { method: "POST" });
-    const j = await r.json();
-    return { token: j.token, expires_in: j.expires_in }; // expires_in en segundos
-  },
+  // tokenFromEndpoint lanza Error con .status si !ok (401/403 => fatal).
+  tokenProvider: () => tokenFromEndpoint("/socket-token", { method: "POST" }),
 });
 
 sc.on("status", (s) => console.log("estado:", s));

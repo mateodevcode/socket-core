@@ -35,7 +35,7 @@
     </form>
 
     <script type="module">
-      import { connect } from "/sdk/socket-core.mjs";
+      import { connect, tokenFromEndpoint } from "/sdk/socket-core.mjs";
 
       const estado = document.getElementById("estado");
       const fatal = document.getElementById("fatal");
@@ -81,10 +81,11 @@
       async function conectar() {
         // El backend del proyecto pide el JWT con la API key (que vive SOLO allí).
         // El navegador recibe únicamente el JWT de corta vida.
-        const primera = await fetch("/socket-token", { method: "POST" });
-        const inicial = await primera.json();
-        if (!primera.ok) {
-          add("sys", `no se pudo obtener el token: ${inicial.error || primera.status}`);
+        let inicial;
+        try {
+          inicial = await tokenFromEndpoint("/socket-token", { method: "POST" });
+        } catch (e) {
+          add("sys", `no se pudo obtener el token (${e.status || "red"})`);
           return;
         }
         let primerTokenPendiente = true;
@@ -93,10 +94,7 @@
             primerTokenPendiente = false;
             return { token: inicial.token, expires_in: inicial.expires_in };
           }
-          const r = await fetch("/socket-token", { method: "POST" });
-          const j = await r.json();
-          if (!r.ok) throw new Error(j.error || "no se pudo obtener el token");
-          return { token: j.token, expires_in: j.expires_in };
+          return tokenFromEndpoint("/socket-token", { method: "POST" });
         };
 
         sc = connect({

@@ -13,6 +13,7 @@ import {
   _classifyTokenError,
   _RecentIds,
   _MIN_TOKEN_INTERVAL_MS,
+  tokenFromEndpoint,
 } from "../socket-core.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -627,6 +628,74 @@ test("rate_limited programa UNA sola reconexión (>=10s)", { timeout: 30000 }, a
     assert.ok(recon[0].ms >= 10000, `rate_limited debe esperar >=10s: ${recon[0].ms}`);
   } finally {
     sdk.close();
+    await hub.cleanup();
+  }
+});
+
+// ---------- S5: tokenFromEndpoint ----------
+
+async function stubHttp(handler) {
+  const http = await import("node:http");
+  const srv = http.createServer(handler);
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const { port } = srv.address();
+  return {
+    url: `http://127.0.0.1:${port}/token`,
+    close: () => new Promise((r) => srv.close(r)),
+  };
+}
+
+test("tokenFromEndpoint 401 => fatal sin reintentos", { timeout: 20000 }, async () => {
+  const stub = await stubHttp((_req, res) => {
+    res.writeHead(401, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "no" }));
+  });
+  const statuses = [];
+  const sdk = connect({
+    url: "ws://127.0.0.1:9/ws",
+    channel: "t:chat",
+    tokenProvider: () => tokenFromEndpoint(stub.url),
+  });
+  sdk.on("status", (s) => statuses.push(s));
+  try {
+    const fatal = await once(sdk, "fatal", 8000);
+    assert.equal(fatal.code, "auth_failed");
+    await sleep(800);
+    assert.ok(!statuses.includes("reconnecting"), JSON.stringify(statuses));
+  } finally {
+    sdk.close();
+    await stub.close();
+  }
+});
+
+test("tokenFromEndpoint 503 => backoff y reintenta", { timeout: 25000 }, async () => {
+  const hub = await setupHub();
+  const tok = await hub.mint("user-503");
+  let calls = 0;
+  const stub = await stubHttp((_req, res) => {
+    calls += 1;
+    if (calls === 1) {
+      res.writeHead(503, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "unavailable" }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ token: tok.data.token, expires_in: tok.data.expires_in }));
+  });
+  const statuses = [];
+  const sdk = connect({
+    url: `ws://127.0.0.1:${hub.port}/ws`,
+    channel: CHANNEL,
+    tokenProvider: () => tokenFromEndpoint(stub.url),
+  });
+  sdk.on("status", (s) => statuses.push(s));
+  try {
+    await waitStatus(sdk, "connected", 15000);
+    assert.ok(statuses.includes("reconnecting"), JSON.stringify(statuses));
+    assert.ok(calls >= 2, `debe reintentar: ${calls}`);
+  } finally {
+    sdk.close();
+    await stub.close();
     await hub.cleanup();
   }
 });

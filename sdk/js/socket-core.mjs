@@ -1,15 +1,11 @@
 // socket-core SDK — un solo fichero, sin dependencias, navegador y Node >= 22.
 //
-//   import { connect } from "./socket-core.mjs";
+//   import { connect, tokenFromEndpoint } from "./socket-core.mjs";
 //   const sc = connect({
 //     url: "wss://hub.ejemplo.com",           // o http(s)://... -> se convierte
 //     channel: "demo:chat",
 //     device: "movil",                        // opcional
-//     tokenProvider: async () => {            // LO IMPLEMENTA TU BACKEND
-//       const r = await fetch("/socket-token"); // tu API key vive SOLO en el backend
-//       const j = await r.json();
-//       return { token: j.token, expires_in: j.expires_in }; // expires_in en segundos
-//     },
+//     tokenProvider: () => tokenFromEndpoint("/socket-token", { method: "POST" }),
 //   });
 //   sc.on("message", (ev) => ...); sc.on("status", (s) => ...);
 //   await sc.publish({ type: "chat", text: "hola" }, { targets: ["user-1"] });
@@ -99,6 +95,29 @@ export class _RecentIds {
   get size() {
     return this.set.size;
   }
+}
+
+/**
+ * Pide un JWT al backend del proyecto. Si la respuesta no es 2xx lanza Error con
+ * `.status` (401/403 => el SDK lo trata como fatal; 5xx/red => reintenta).
+ * Devuelve { token, expires_in }.
+ */
+export async function tokenFromEndpoint(url, init = {}) {
+  const r = await fetch(url, { credentials: "same-origin", ...init });
+  if (!r.ok) {
+    let detalle = "";
+    try {
+      detalle = String((await r.json())?.error ?? "");
+    } catch {}
+    const e = new Error(`token endpoint ${r.status}${detalle ? `: ${detalle}` : ""}`);
+    e.status = r.status;
+    throw e;
+  }
+  const j = await r.json();
+  if (!j || typeof j.token !== "string" || !j.token) {
+    throw new Error("el endpoint no devolvió { token, expires_in }");
+  }
+  return { token: j.token, expires_in: j.expires_in };
 }
 
 /** Estrategia ante errores de tokenProvider: 401/403 => fatal; red/5xx => reintentar. */

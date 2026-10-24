@@ -158,16 +158,12 @@ El SDK funciona en navegador y **Node.js ≥ 22** (WebSocket nativo; sin cliente
 propio).
 
 ```js
-import { connect } from "./socket-core.mjs";
+import { connect, tokenFromEndpoint } from "./socket-core.mjs";
 const sc = connect({
   url: "wss://hub.ejemplo.com",
   channel: "demo:chat",
   device: "portatil",
-  tokenProvider: async () => {
-    const r = await fetch("/socket-token", { method: "POST" });
-    const j = await r.json();
-    return { token: j.token, expires_in: j.expires_in };
-  },
+  tokenProvider: () => tokenFromEndpoint("/socket-token", { method: "POST" }),
 });
 ```
 
