@@ -1,8 +1,9 @@
 # SDK de socket-core (JavaScript)
 
 Un solo fichero (`socket-core.mjs`), **sin dependencias**, para navegador y
-Node.js ≥ 18. Tu aplicación solo necesita un endpoint que devuelva un JWT; el SDK
-se encarga de conexión, handshake, renovación y reconexión.
+**Node.js ≥ 22** (usa el `WebSocket` global; no incluye cliente propio). Tu
+aplicación solo necesita un endpoint que devuelva un JWT; el SDK se encarga de
+conexión, handshake, renovación y reconexión.
 
 ## Seguridad (leer)
 
@@ -71,10 +72,18 @@ tu backend lo conoce; así `publish()` rechaza localmente sin ir al servidor.
 
 Detalle de todos los códigos: [`docs/CODIGOS.md`](../../docs/CODIGOS.md).
 
-## Node ≥ 18
+## Node ≥ 22
 
-En navegador usa `WebSocket` nativo. En Node < 21 (sin `WebSocket` global) el SDK
-usa un cliente WS mínimo propio (solo `node:net`/`node:tls`), sin dependencias.
+Usa el `WebSocket` nativo del navegador o de Node ≥ 22. En Node 18–20 (sin
+`WebSocket` global) el SDK lanza un error claro; puedes aportar un polyfill global
+si lo necesitas (no se incluye cliente WS propio para evitar bugs de protocolo).
+Si el `tokenProvider` lanza un error con `status` 401/403 (o el mensaje contiene
+401/403), el SDK emite `fatal` y **no reintenta**; los fallos de red o 5xx usan
+backoff con jitter. Además serializa/espacia las llamadas a `tokenProvider`
+(≥220 ms) para respetar el límite de `/auth/token` (5 req/s por IP).
+
+El deduplicador guarda solo los últimos **1000 ids**. `close()` limpia timers,
+sockets y renovaciones en curso.
 
 ## Tests del SDK
 
@@ -89,5 +98,4 @@ Cubren: conexión, presencia, publicar/recibir, clasificación de códigos, no
 reconexión tras `credential_revoked`, reconexión tras caída del servidor y
 deduplicación durante la renovación solapada.
 
-> Los tests usan el runner de Node y `--test-force-exit` (Node ≥ 20). El SDK en
-> sí funciona en Node ≥ 18.
+> Los tests usan el runner de Node y `--test-force-exit` (Node ≥ 22, igual que el runtime del SDK).

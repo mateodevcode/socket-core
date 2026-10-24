@@ -7,7 +7,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { connect, _classifyClose } from "../socket-core.mjs";
+import {
+  connect,
+  _classifyClose,
+  _classifyTokenError,
+  _RecentIds,
+  _MIN_TOKEN_INTERVAL_MS,
+} from "../socket-core.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..", "..", "..");
@@ -221,10 +227,10 @@ test("clasificación de códigos de cierre", () => {
 
 // ---------- Connect, presence, publish, receive (transporte Node) ----------
 
-test("conecta, presencia, publica y recibe (transporte Node sin WebSocket global)", { timeout: 30000 }, async () => {
+test("conecta, presencia, publica y recibe", { timeout: 30000 }, async () => {
   const hub = await setupHub();
-  const a = clientSdk(hub, "user-a", { _forceNodeTransport: true });
-  const b = clientSdk(hub, "user-b", { _forceNodeTransport: true });
+  const a = clientSdk(hub, "user-a");
+  const b = clientSdk(hub, "user-b");
   const presence = [];
   const messages = [];
   a.on("presence", (p) => presence.push(p));
@@ -361,6 +367,98 @@ test("credential_revoked durante renovación => fatal (no bucle)", { timeout: 30
     assert.equal(rev.status, 200);
     const fatal = await once(sdk, "fatal", 8000);
     assert.equal(fatal.code, "credential_revoked");
+  } finally {
+    sdk.close();
+    await hub.cleanup();
+  }
+});
+
+// ---------- B6: clasificación de errores de tokenProvider ----------
+
+test("tokenProvider 401/403 => fatal sin reconectar", { timeout: 20000 }, async () => {
+  for (const status of [401, 403]) {
+    const hub = await setupHub();
+    const statuses = [];
+    const sdk = clientSdk(hub, "user-authfail", {
+      tokenProvider: async () => {
+        throw Object.assign(new Error(`no autorizado (${status})`), { status });
+      },
+    });
+    sdk.on("status", (s) => statuses.push(s));
+    try {
+      const fatal = await once(sdk, "fatal", 8000);
+      assert.equal(fatal.code, "auth_failed");
+      await sleep(800);
+      assert.ok(!statuses.includes("reconnecting"), `no debe reintentar: ${JSON.stringify(statuses)}`);
+    } finally {
+      sdk.close();
+      await hub.cleanup();
+    }
+  }
+});
+
+test("tokenProvider 500/red => backoff y reintenta", { timeout: 20000 }, async () => {
+  const hub = await setupHub();
+  let intentos = 0;
+  const sdk = clientSdk(hub, "user-500", {
+    tokenProvider: async () => {
+      intentos += 1;
+      if (intentos === 1) {
+        throw Object.assign(new Error("boom 500"), { status: 500 });
+      }
+      const j = await hub.mint("user-500");
+      return { token: j.data.token, expires_in: j.data.expires_in };
+    },
+  });
+  const statuses = [];
+  sdk.on("status", (s) => statuses.push(s));
+  try {
+    await waitStatus(sdk, "connected", 12000);
+    assert.ok(statuses.includes("reconnecting"), `debe pasar por reconnecting: ${JSON.stringify(statuses)}`);
+    assert.ok(intentos >= 2, "debe reintentar el tokenProvider");
+  } finally {
+    sdk.close();
+    await hub.cleanup();
+  }
+});
+
+test("throttle de tokenProvider respeta 5 req/s", () => {
+  assert.ok(_MIN_TOKEN_INTERVAL_MS >= 200, ">=200 ms para no superar 5 req/s");
+  assert.equal(_classifyTokenError({ status: 401 }), "fatal");
+  assert.equal(_classifyTokenError({ status: 403 }), "fatal");
+  assert.equal(_classifyTokenError({ status: 500 }), "retry");
+  assert.equal(_classifyTokenError(new Error("network down")), "retry");
+});
+
+test("dedupe acotado a los últimos 1000 ids", () => {
+  const d = new _RecentIds(1000);
+  for (let i = 0; i < 1200; i++) assert.equal(d.first(`id-${i}`), true);
+  assert.equal(d.size, 1000);
+  assert.equal(d.first("id-0"), true, "el más viejo fue expulsado");
+  assert.equal(d.first("id-1199"), false, "los recientes se recuerdan");
+});
+
+test("close() limpia timers y no deja reconexiones", { timeout: 20000 }, async () => {
+  const hub = await setupHub();
+  let llamadas = 0;
+  const sdk = clientSdk(hub, "user-close", {
+    tokenProvider: async () => {
+      llamadas += 1;
+      const j = await hub.mint("user-close");
+      return { token: j.data.token, expires_in: j.data.expires_in };
+    },
+  });
+  const statuses = [];
+  sdk.on("status", (s) => statuses.push(s));
+  try {
+    await waitStatus(sdk, "connected");
+    const antes = llamadas;
+    sdk.close();
+    await sleep(1500);
+    assert.equal(sdk.status, "closed");
+    assert.equal(llamadas, antes, "no debe pedir más tokens tras close()");
+    assert.ok(!statuses.slice(statuses.indexOf("closed")).includes("reconnecting"));
+    assert.ok(statuses.includes("closed"));
   } finally {
     sdk.close();
     await hub.cleanup();

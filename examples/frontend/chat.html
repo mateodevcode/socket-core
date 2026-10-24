@@ -112,8 +112,21 @@
         sc.on("fatal", (f) => {
           fatal.textContent = `conexión terminada: ${f.code} — ${f.detail || ""}`;
         });
+        // Un usuario puede tener VARIAS conexiones (renovación con solape): contamos
+        // por usuario para no marcarlo "desconectado" si su conexión nueva sigue viva.
+        const porUsuario = new Map();
         sc.on("presence", (p) => {
-          add("sys", `${p.type}: ${p.user} (total ${p.total_clients})`);
+          const actual = porUsuario.get(p.user) || 0;
+          const siguiente = actual + (p.type === "client_joined" ? 1 : -1);
+          if (siguiente <= 0) {
+            porUsuario.delete(p.user);
+            add("sys", `${p.user} se ha desconectado (total ${p.total_clients})`);
+          } else {
+            porUsuario.set(p.user, siguiente);
+            if (p.type === "client_joined") {
+              add("sys", `${p.user} conectado (${siguiente} conexión/es)`);
+            }
+          }
         });
         sc.on("missed_events", (m) => {
           add("sys", `perdidos ${m.missed} eventos (cliente lento)`);

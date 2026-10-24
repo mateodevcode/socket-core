@@ -24,7 +24,6 @@ const DEFAULT_RENEW_BEFORE_MS = 60_000;
 const MIN_BACKOFF_MS = 500;
 const MAX_BACKOFF_MS = 30_000;
 const RATE_LIMITED_MIN_WAIT_MS = 10_000;
-const DEDUPE_CAP = 1000;
 
 const FATAL_CODES = new Set([
   "forbidden",
@@ -65,195 +64,49 @@ function normalizeWsUrl(url) {
   return u;
 }
 
-/** Transporte mínimo WebSocket para Node >= 18 (sin dependencias). */
-class NodeWebSocket {
-  constructor(url) {
-    this.onopen = null;
-    this.onmessage = null;
-    this.onclose = null;
-    this.onerror = null;
-    this._buf = Buffer.alloc(0);
-    this._handshakeDone = false;
-    this._closed = false;
-    this._closeEmitted = false;
-    this._frag = "";
-    this._init(url).catch((e) => this._fail(e));
+/** Abre el WebSocket nativo (navegador o Node >= 22). Sin cliente casero. */
+function openWebSocket(url) {
+  if (typeof globalThis.WebSocket !== "function") {
+    throw new Error(
+      "WebSocket no disponible: usa un navegador o Node.js >= 22 (o pasa un polyfill global)",
+    );
   }
+  return new globalThis.WebSocket(url);
+}
 
-  async _init(url) {
-    const u = new URL(url);
-    const secure = u.protocol === "wss:";
-    const host = u.hostname;
-    const port = Number(u.port || (secure ? 443 : 80));
-    const net = await import(secure ? "node:tls" : "node:net");
-    const crypto = await import("node:crypto");
-    this._crypto = crypto;
-    const key = crypto.randomBytes(16).toString("base64");
-    this._expectedAccept = crypto
-      .createHash("sha1")
-      .update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
-      .digest("base64");
+/** Intervalo mínimo entre llamadas a tokenProvider (Nginx limita /auth/token a 5 r/s). */
+export const _MIN_TOKEN_INTERVAL_MS = 220;
 
-    const socket = secure
-      ? net.connect({ host, port, servername: host })
-      : net.connect({ host, port });
-    this._socket = socket;
-    socket.on("error", (e) => this._fail(e));
-    socket.on("close", () => {
-      if (!this._closeEmitted) this._emitClose(1006, "network");
-    });
-    socket.on("data", (chunk) => {
-      this._buf = Buffer.concat([this._buf, chunk]);
-      this._consume();
-    });
-    socket.once(secure ? "secureConnect" : "connect", () => {
-      const path = u.pathname + (u.search || "");
-      socket.write(
-        `GET ${path} HTTP/1.1\r\nHost: ${u.host}\r\nUpgrade: websocket\r\n` +
-          `Connection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\n` +
-          `Sec-WebSocket-Version: 13\r\n\r\n`,
-      );
-    });
+/** Deduplicador acotado por id (últimos N). */
+export class _RecentIds {
+  constructor(cap = 1000) {
+    this.cap = cap;
+    this.set = new Set();
+    this.order = [];
   }
-
-  _consume() {
-    if (!this._handshakeDone) {
-      const idx = this._buf.indexOf("\r\n\r\n");
-      if (idx === -1) return;
-      const head = this._buf.subarray(0, idx).toString("latin1");
-      this._buf = this._buf.subarray(idx + 4);
-      const status = Number((/^HTTP\/1\.1 (\d{3})/.exec(head.split("\r\n")[0]) || [])[1] || 0);
-      const accept = (/sec-websocket-accept:\s*(\S+)/i.exec(head) || [])[1];
-      if (status !== 101 || (accept && accept !== this._expectedAccept)) {
-        this._fail(new Error(`handshake rechazado (HTTP ${status})`));
-        return;
-      }
-      this._handshakeDone = true;
-      if (!this._closed) this.onopen?.({});
+  /** true si es la primera vez que se ve el id. */
+  first(id) {
+    if (!id) return true;
+    if (this.set.has(id)) return false;
+    this.set.add(id);
+    this.order.push(id);
+    if (this.order.length > this.cap) {
+      this.set.delete(this.order.shift());
     }
-    for (;;) {
-      const frame = this._parseFrame();
-      if (!frame) return;
-      this._handleFrame(frame);
-    }
+    return true;
   }
-
-  _parseFrame() {
-    const b = this._buf;
-    if (b.length < 2) return null;
-    const fin = (b[0] & 0x80) !== 0;
-    const opcode = b[0] & 0x0f;
-    const masked = (b[1] & 0x80) !== 0;
-    let len = b[1] & 0x7f;
-    let off = 2;
-    if (len === 126) {
-      if (b.length < 4) return null;
-      len = b.readUInt16BE(2);
-      off = 4;
-    } else if (len === 127) {
-      if (b.length < 10) return null;
-      const big = b.readBigUInt64BE(2);
-      if (big > 16_777_216n) return null; // >16MB: no aplica a este hub
-      len = Number(big);
-      off = 10;
-    }
-    let mask = null;
-    if (masked) {
-      if (b.length < off + 4) return null;
-      mask = b.subarray(off, off + 4);
-      off += 4;
-    }
-    if (b.length < off + len) return null;
-    const payload = Buffer.from(b.subarray(off, off + len));
-    if (mask) for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
-    this._buf = b.subarray(off + len);
-    return { fin, opcode, payload };
-  }
-
-  _handleFrame({ fin, opcode, payload }) {
-    if (opcode === 0x1 || opcode === 0x0) {
-      this._frag += payload.toString("utf8");
-      if (fin) {
-        const data = this._frag;
-        this._frag = "";
-        this.onmessage?.({ data });
-      }
-      return;
-    }
-    if (opcode === 0x8) {
-      this._emitClose(1000, payload.toString("utf8"));
-      this._shutdown();
-      return;
-    }
-    if (opcode === 0x9) {
-      this._sendFrame(0xa, payload); // ping -> pong
-      return;
-    }
-    if (opcode === 0xa) return; // pong
-  }
-
-  _sendFrame(opcode, data) {
-    if (!this._socket || this._closed || !this._crypto) return;
-    const payload = Buffer.isBuffer(data) ? data : Buffer.from(String(data), "utf8");
-    let header;
-    if (payload.length < 126) {
-      header = Buffer.from([0x80 | opcode, 0x80 | payload.length]);
-    } else if (payload.length < 65536) {
-      header = Buffer.alloc(4);
-      header[0] = 0x80 | opcode;
-      header[1] = 0x80 | 126;
-      header.writeUInt16BE(payload.length, 2);
-    } else {
-      header = Buffer.alloc(10);
-      header[0] = 0x80 | opcode;
-      header[1] = 0x80 | 127;
-      header.writeBigUInt64BE(BigInt(payload.length), 2);
-    }
-    const mask = this._crypto.randomBytes(4);
-    const masked = Buffer.alloc(payload.length);
-    for (let i = 0; i < payload.length; i++) masked[i] = payload[i] ^ mask[i % 4];
-    this._socket.write(Buffer.concat([header, mask, masked]));
-  }
-
-  send(data) {
-    if (!this._handshakeDone) throw new Error("no conectado");
-    this._sendFrame(0x1, data);
-  }
-
-  close() {
-    if (this._closed) return;
-    this._closed = true;
-    try {
-      this._sendFrame(0x8, Buffer.alloc(0));
-    } catch {}
-    this._shutdown();
-  }
-
-  _shutdown() {
-    try {
-      this._socket?.end();
-      this._socket?.destroy();
-    } catch {}
-  }
-
-  _fail(err) {
-    this.onerror?.(err);
-    this._emitClose(1006, String(err?.message || err));
-    this._shutdown();
-  }
-
-  _emitClose(code, reason) {
-    if (this._closeEmitted) return;
-    this._closeEmitted = true;
-    this.onclose?.({ code, reason });
+  get size() {
+    return this.set.size;
   }
 }
 
-function createTransport(url, options) {
-  if (!options._forceNodeTransport && typeof globalThis.WebSocket === "function") {
-    return new globalThis.WebSocket(url);
-  }
-  return new NodeWebSocket(url);
+/** Estrategia ante errores de tokenProvider: 401/403 => fatal; red/5xx => reintentar. */
+export function _classifyTokenError(err) {
+  const status = Number(err?.status ?? err?.statusCode ?? 0);
+  if (status === 401 || status === 403) return "fatal";
+  const msg = String(err?.message ?? err ?? "");
+  if (/\b(401|403)\b/.test(msg)) return "fatal";
+  return "retry";
 }
 
 /**
@@ -283,8 +136,8 @@ export function connect(options = {}) {
     renewTimer: null,
     backoff: 0,
     role: options.role || null,
-    seen: new Set(),
-    seenOrder: [],
+    seen: new _RecentIds(1000),
+    lastTokenAt: 0,
   };
 
   const emit = (name, data) => {
@@ -312,31 +165,42 @@ export function connect(options = {}) {
       sock.ws.close();
     } catch {}
   };
-  const dedupe = (id) => {
-    if (!id) return true;
-    if (state.seen.has(id)) return false;
-    state.seen.add(id);
-    state.seenOrder.push(id);
-    if (state.seenOrder.length > DEDUPE_CAP) {
-      const old = state.seenOrder.shift();
-      state.seen.delete(old);
-    }
-    return true;
-  };
+  const dedupe = (id) => state.seen.first(id);
 
-  async function getToken() {
-    const t = await tokenProvider();
-    if (!t || typeof t.token !== "string" || !t.token) {
-      throw new Error("tokenProvider debe devolver { token, expires_in }");
-    }
-    if (t.role) state.role = t.role;
-    return t;
+  // Serializa y espacia las llamadas a tokenProvider (límite de /auth/token).
+  let tokenChain = Promise.resolve();
+  function getToken() {
+    const run = async () => {
+      const wait = Math.max(0, state.lastTokenAt + _MIN_TOKEN_INTERVAL_MS - Date.now());
+      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+      state.lastTokenAt = Date.now();
+      const t = await tokenProvider();
+      if (!t || typeof t.token !== "string" || !t.token) {
+        throw new Error("tokenProvider debe devolver { token, expires_in }");
+      }
+      if (t.role) state.role = t.role;
+      return t;
+    };
+    const next = tokenChain.then(run, run);
+    // La cadena no debe romperse si un intento falla.
+    tokenChain = next.catch(() => {});
+    return next;
+  }
+
+  function handleFatal(code, detail) {
+    if (state.fatal || state.closed) return;
+    state.fatal = true;
+    clearTimers();
+    safeClose(state.active);
+    safeClose(state.candidate);
+    setStatus("fatal");
+    emit("fatal", { code, detail });
   }
 
   function startSocket(tokenInfo, mode) {
     const url = new URL(wsUrl.toString());
     url.searchParams.set("token", tokenInfo.token);
-    const ws = createTransport(url.toString(), options);
+    const ws = openWebSocket(url.toString());
     const sock = { ws, mode, ready: false, tokenInfo };
     ws.onopen = () => {
       try {
@@ -382,12 +246,7 @@ export function connect(options = {}) {
   function handleServerError(code, detail) {
     const strategy = _classifyClose(code);
     if (strategy === "fatal") {
-      state.fatal = true;
-      clearTimers();
-      safeClose(state.active);
-      safeClose(state.candidate);
-      setStatus("fatal");
-      emit("fatal", { code, detail });
+      handleFatal(code, detail);
       return;
     }
     safeClose(state.active);
@@ -471,12 +330,21 @@ export function connect(options = {}) {
     let tokenInfo;
     try {
       tokenInfo = await getToken();
-    } catch {
-      scheduleReconnect();
+    } catch (e) {
+      if (state.closed || state.fatal) return;
+      if (_classifyTokenError(e) === "fatal") {
+        handleFatal(e?.code || "auth_failed", String(e?.message || e));
+      } else {
+        scheduleReconnect();
+      }
       return;
     }
     if (state.closed || state.fatal) return;
-    state.active = startSocket(tokenInfo, "primary");
+    try {
+      state.active = startSocket(tokenInfo, "primary");
+    } catch (e) {
+      handleFatal("ws_unavailable", String(e?.message || e));
+    }
   }
 
   function scheduleRenewal(sock) {
@@ -502,12 +370,21 @@ export function connect(options = {}) {
     let tokenInfo;
     try {
       tokenInfo = await getToken();
-    } catch {
-      scheduleRenewalRetry();
+    } catch (e) {
+      if (state.closed || state.fatal) return;
+      if (_classifyTokenError(e) === "fatal") {
+        handleFatal(e?.code || "auth_failed", String(e?.message || e));
+      } else {
+        scheduleRenewalRetry();
+      }
       return;
     }
     if (state.closed || state.fatal) return;
-    state.candidate = startSocket(tokenInfo, "renewal");
+    try {
+      state.candidate = startSocket(tokenInfo, "renewal");
+    } catch (e) {
+      handleFatal("ws_unavailable", String(e?.message || e));
+    }
   }
 
   const api = {
