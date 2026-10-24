@@ -23,19 +23,28 @@ cargo run
 
 ## 2. Crea el proyecto y el canal
 
-Con el hub en marcha, en otra terminal (desde la raíz del repo):
+El **canal se crea aparte**, no al arrancar el backend. La key del ejemplo debe
+quedar con scopes mínimos `publish,subscribe` (sin `manage`).
 
 ```bash
-# Crea la key del proyecto (guarda el paquete 0600 que genera)
-python3 scripts/alta_cliente.py --env .env --list-prefixes     # ver prefijos usados
+# 2.1 Key temporal CON manage para crear el canal (guarda el paquete 0600)
 python3 scripts/alta_cliente.py --env .env --out .
 #   Dominios: http://127.0.0.1:8080
 #   Prefijo:  demo:*
-#   Scopes:   publish,subscribe,manage   (manage para que el ejemplo cree el canal)
+#   Scopes:   publish,subscribe,manage   <- manage solo para este paso
+
+KEY=$(grep ^API_KEY= credenciales-demo-*.txt | cut -d= -f2)
+# 2.2 Crea el canal
+curl -s -X POST http://127.0.0.1:3005/channels   -H "X-Api-Key: $KEY" -H 'Content-Type: application/json'   -d '{"name":"demo:chat","description":"canal de ejemplo"}'
+
+# 2.3 Quita manage de la key (deja publish,subscribe)
+MASTER=$(grep ^MASTER_KEY= .env | cut -d= -f2)
+KEY_ID=$(grep ^KEY_ID= credenciales-demo-*.txt | cut -d= -f2)
+curl -s -X PATCH http://127.0.0.1:3015/admin/keys/$KEY_ID   -H "X-Master-Key: $MASTER" -H 'Content-Type: application/json'   -d '{"scopes":["publish","subscribe"]}'
 ```
 
 El fichero `credenciales-demo-*.txt` contiene la `API_KEY`. Cópiala a una variable
-de entorno (y borra el fichero después).
+de entorno y **borra el fichero** después.
 
 ## 3. Arranca el backend de ejemplo
 
@@ -52,11 +61,16 @@ nombre para ver presencia y mensajes en el mismo canal.
 
 | Variable | Default | Descripción |
 |---|---|---|
-| `SOCKET_CORE_URL` | `http://127.0.0.1:3005` | URL del hub (pública/local). |
-| `SOCKET_API_KEY` | — (obligatoria) | API key del proyecto (solo backend). |
+| `SOCKET_CORE_URL` | — (**obligatoria**) | Hub visto desde el **backend** (interno). |
+| `SOCKET_PUBLIC_URL` | — (**obligatoria**) | Hub que recibe el **navegador** (puede diferir). |
+| `SOCKET_API_KEY` | — (**obligatoria**) | API key del proyecto (solo backend; scopes `publish,subscribe`). |
 | `SOCKET_CHANNEL` | `demo:chat` | Canal del chat. |
-| `SOCKET_CREATE_CHANNEL` | `true` | El backend intenta crear el canal al arrancar. |
 | `PORT` | `8080` | Puerto del ejemplo. |
+
+El backend comprueba con `canAccess(user, CHANNEL, CHANNEL)` (ver
+`examples/backend/policy.mjs`) **antes** de pedir el JWT: en una app real ahí va tu
+autorización (rol, tenant, membresía…). Los errores del hub no se reenvían al
+navegador: solo `{"error":"token_unavailable"}` y el detalle queda en el log.
 
 ## Cómo funciona (resumen)
 

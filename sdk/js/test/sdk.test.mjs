@@ -723,3 +723,12 @@ test("presencia por Set de connection_id: el solape no marca offline", async () 
   assert.equal(r.online, false);
   assert.equal(t.count("u1"), 0);
 });
+
+// ---------- S7: autorización explícita del backend de ejemplo ----------
+
+test("canAccess exige sesión y canal permitido", async () => {
+  const { canAccess } = await import("../../../examples/backend/policy.mjs");
+  assert.equal(canAccess(null, "demo:chat", "demo:chat"), false);
+  assert.equal(canAccess({ id: "u1" }, "otro:chat", "demo:chat"), false);
+  assert.equal(canAccess({ id: "u1" }, "demo:chat", "demo:chat"), true);
+});

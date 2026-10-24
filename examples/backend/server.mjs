@@ -11,20 +11,30 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const HUB = process.env.SOCKET_CORE_URL || "http://127.0.0.1:3005";
-const API_KEY = process.env.SOCKET_API_KEY;
+import { canAccess } from "./policy.mjs";
+
+function requireEnv(name) {
+  const v = process.env[name];
+  if (!v) {
+    console.error(`Falta ${name} (obligatoria).`);
+    process.exit(1);
+  }
+  return v;
+}
+
+// Backend -> hub (interno) y URL pública que recibe el navegador (puede diferir).
+const HUB = requireEnv("SOCKET_CORE_URL");
+const PUBLIC_URL = requireEnv("SOCKET_PUBLIC_URL");
+const API_KEY = requireEnv("SOCKET_API_KEY");
 const CHANNEL = process.env.SOCKET_CHANNEL || "demo:chat";
 const PORT = Number(process.env.PORT || 8080);
-const CREATE_CHANNEL = (process.env.SOCKET_CREATE_CHANNEL || "true") !== "false";
-
-if (!API_KEY) {
-  console.error("Falta SOCKET_API_KEY (la API key del proyecto; solo backend).");
-  process.exit(1);
-}
 
 const app = express();
 app.use(express.json());
-app.use("/sdk", express.static(join(__dirname, "..", "..", "sdk", "js")));
+// Solo el fichero del SDK (no todo el directorio sdk/js).
+app.get("/sdk/socket-core.mjs", (_req, res) => {
+  res.sendFile(join(__dirname, "..", "..", "sdk", "js", "socket-core.mjs"));
+});
 app.use(express.static(join(__dirname, "..", "frontend")));
 
 // Sesión de demo en memoria: cookie HttpOnly con un ID opaco (NO emails).
@@ -77,6 +87,11 @@ app.get("/presence", async (req, res) => {
 app.post("/socket-token", async (req, res) => {
   const user = sessionUser(req);
   if (!user) return res.status(401).json({ error: "no has iniciado sesión" });
+  // Autorización explícita ANTES de emitir credenciales para el canal.
+  // En una app real: comprobar membresía/rol/tenant, no solo el canal configurado.
+  if (!canAccess(user, CHANNEL, CHANNEL)) {
+    return res.status(403).json({ error: "forbidden" });
+  }
   try {
     const r = await fetch(`${HUB}/auth/token`, {
       method: "POST",
@@ -85,41 +100,23 @@ app.post("/socket-token", async (req, res) => {
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.success) {
-      return res.status(502).json({ error: j.error || `hub respondió ${r.status}` });
+      // El detalle del hub se queda en el servidor; al navegador solo un código.
+      console.error(`[hub] /auth/token ${r.status}: ${j.error || "sin detalle"}`);
+      return res.status(502).json({ error: "token_unavailable" });
     }
-    // El navegador recibe SOLO el JWT de corta vida.
+    // El navegador recibe SOLO el JWT de corta vida y la URL PÚBLICA.
     res.json({
       token: j.data.token,
       expires_in: j.data.expires_in,
       channel: CHANNEL,
-      url: HUB,
+      url: PUBLIC_URL,
     });
   } catch (e) {
-    res.status(502).json({ error: `no se pudo contactar con el hub: ${e.message}` });
+    console.error(`[hub] /auth/token error: ${e.message}`);
+    res.status(502).json({ error: "token_unavailable" });
   }
 });
 
-async function ensureChannel() {
-  if (!CREATE_CHANNEL) return;
-  try {
-    const r = await fetch(`${HUB}/channels`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-api-key": API_KEY },
-      body: JSON.stringify({ name: CHANNEL, description: "canal de ejemplo" }),
-    });
-    if (r.status === 201) console.log(`[hub] canal ${CHANNEL} creado`);
-    else if (r.status === 400) console.log(`[hub] canal ${CHANNEL} ya existe`);
-    else if (r.status === 403)
-      console.warn(
-        `[hub] la key no tiene scope 'manage': crea el canal ${CHANNEL} manualmente`,
-      );
-    else console.warn(`[hub] al crear canal: HTTP ${r.status}`);
-  } catch (e) {
-    console.warn(`[hub] no se pudo verificar el canal: ${e.message}`);
-  }
-}
-
-app.listen(PORT, async () => {
+app.listen(PORT, () => {
   console.log(`Ejemplo en http://127.0.0.1:${PORT}  (hub: ${HUB}, canal: ${CHANNEL})`);
-  await ensureChannel();
 });
