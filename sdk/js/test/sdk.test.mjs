@@ -589,3 +589,44 @@ test("DB caída a mitad => server_error y reconecta cuando vuelve", { timeout: 7
     await hub.cleanup();
   }
 });
+
+// ---------- S3: una sola reconexión tras error+Close ----------
+
+test("rate_limited programa UNA sola reconexión (>=10s)", { timeout: 30000 }, async () => {
+  const hub = await setupHub();
+  const sdk = clientSdk(hub, "user-rl");
+  try {
+    await waitStatus(sdk, "connected");
+    const origSet = globalThis.setTimeout;
+    const origClear = globalThis.clearTimeout;
+    const timers = [];
+    // "Fake timers": capturamos los programados por el SDK sin ejecutarlos.
+    globalThis.setTimeout = (fn, ms, ...args) => {
+      timers.push({ fn, ms, args });
+      return 9000 + timers.length;
+    };
+    globalThis.clearTimeout = () => {};
+    try {
+      for (let i = 0; i < 60; i++) {
+        try {
+          await sdk.publish({ type: "chat", seq: i });
+        } catch {}
+      }
+      // Espera con el timer REAL a que llegue el error y el Close del servidor.
+      await new Promise((r) => origSet(r, 900));
+    } finally {
+      globalThis.setTimeout = origSet;
+      globalThis.clearTimeout = origClear;
+    }
+    const recon = timers.filter((t) => t.ms >= 500);
+    assert.equal(
+      recon.length,
+      1,
+      `debe programarse UNA sola reconexión: ${JSON.stringify(recon.map((t) => t.ms))}`,
+    );
+    assert.ok(recon[0].ms >= 10000, `rate_limited debe esperar >=10s: ${recon[0].ms}`);
+  } finally {
+    sdk.close();
+    await hub.cleanup();
+  }
+});

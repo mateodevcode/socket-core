@@ -134,6 +134,7 @@ export function connect(options = {}) {
     active: null,
     candidate: null,
     reconnectTimer: null,
+    reconnectPending: false,
     renewTimer: null,
     backoff: 0,
     role: options.role || null,
@@ -191,6 +192,7 @@ export function connect(options = {}) {
   function handleFatal(code, detail) {
     if (state.fatal || state.closed) return;
     state.fatal = true;
+    state.reconnectPending = false;
     clearTimers();
     safeClose(state.active);
     safeClose(state.candidate);
@@ -328,14 +330,19 @@ export function connect(options = {}) {
   }
 
   function scheduleReconnect(minWaitMs = 0) {
-    if (state.closed || state.fatal) return;
+    // Un error del servidor suele venir seguido de un Close: solo una reconexión.
+    if (state.closed || state.fatal || state.reconnectPending) return;
     clearTimers();
     const base = Math.min(MAX_BACKOFF_MS, MIN_BACKOFF_MS * 2 ** state.backoff);
     const jitter = Math.random() * base * 0.5;
     const wait = Math.max(minWaitMs, base + jitter);
     state.backoff = Math.min(state.backoff + 1, 6);
+    state.reconnectPending = true;
     setStatus("reconnecting");
-    state.reconnectTimer = setTimeout(connectOnce, wait);
+    state.reconnectTimer = setTimeout(() => {
+      state.reconnectPending = false;
+      connectOnce();
+    }, wait);
   }
 
   async function connectOnce() {
@@ -446,6 +453,7 @@ export function connect(options = {}) {
     close() {
       if (state.closed) return;
       state.closed = true;
+      state.reconnectPending = false;
       clearTimers();
       safeClose(state.active);
       safeClose(state.candidate);
