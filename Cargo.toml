@@ -52,3 +52,6 @@ sqlx = { version = "0.8", default-features = false, features = [
 
 [dev-dependencies]
 tempfile = "3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio-tungstenite = "0.24"
+url = "2"

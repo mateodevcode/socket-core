@@ -61,4 +61,15 @@ impl AppConfig {
     pub fn cors_is_open(&self) -> bool {
         self.allowed_origins.is_empty() || self.allowed_origins.iter().any(|o| o == "*")
     }
+
+    /// Valida los secretos al arrancar. Debe devolver Err para NO iniciar el servicio.
+    /// Requisitos: JWT_SECRET no puede ser el valor por defecto ni tener < 32 caracteres;
+    /// MASTER_KEY debe existir y tener >= 32 caracteres.
+    /// STUB TDD (FASE 1): se implementa de verdad en la fase de arranque estricto.
+    pub fn validate_secrets(&self) -> Result<(), String> {
+        let _ = (&self.jwt_secret, &self.master_key);
+        Ok(())
+    }
 }
+
+pub const DEFAULT_JWT_SECRET: &str = "dev-change-me-please-rotate";
