@@ -43,11 +43,17 @@ pub struct Hub {
 impl Hub {
     /// Levanta un hub completo con proyectos A (prefijo "a:*") y B (prefijo "b:*").
     pub async fn start() -> Self {
+        Self::start_with_limits(socket_core::limits::Limits::default()).await
+    }
+
+    /// Igual que `start` pero con límites personalizados (tests deterministas).
+    pub async fn start_with_limits(limits: socket_core::limits::Limits) -> Self {
         let db_dir = TempDir::new().expect("temp dir");
         let db_path = db_dir.path().join("test.db");
         let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
         let pool = db::init_pool(&db_url).await.expect("temp db pool");
-        let keys = KeyStore::new(pool);
+        let control = socket_core::control::ControlBus::new();
+        let keys = KeyStore::new_with_control(pool, control.clone());
 
         let (ka, raw_a) = keys
             .create(
@@ -79,8 +85,10 @@ impl Hub {
             jwt_ttl_secs: 600,
             master_key: MASTER_KEY.into(),
             limiter: RateLimiter::new(),
-            control: socket_core::control::ControlBus::new(),
+            control,
             registry: socket_core::limits::ConnectionRegistry::new(),
+            limits,
+            publish_limits: socket_core::limits::ProjectPublishLimiters::new(),
         };
 
         let addr = socket_core::start_test_server(state.clone(), &[]).await;
@@ -239,6 +247,63 @@ impl Hub {
     /// Err(0) si no llegó respuesta en HANDSHAKE_CLOSE_TIMEOUT.
     pub async fn ws_open(&self, token: &str, channel: &str) -> Result<WsStream, u16> {
         self.ws_open_handshake(token, channel, None).await
+    }
+
+    /// Crea una key vía /admin/keys (master). Devuelve la respuesta cruda.
+    pub async fn admin_create_key(
+        &self,
+        name: &str,
+        prefix: &str,
+        scopes: &[&str],
+    ) -> reqwest::Response {
+        self.client
+            .post(format!("{}/admin/keys", self.base))
+            .header("x-master-key", MASTER_KEY)
+            .json(&json!({"name": name, "channel_prefix": prefix, "scopes": scopes}))
+            .send()
+            .await
+            .expect("POST /admin/keys")
+    }
+
+    /// PATCH de key vía /admin/keys/:id (master).
+    pub async fn admin_patch_key(&self, id: &str, body: Value) -> reqwest::Response {
+        self.client
+            .patch(format!("{}/admin/keys/{}", self.base, id))
+            .header("x-master-key", MASTER_KEY)
+            .json(&body)
+            .send()
+            .await
+            .expect("PATCH /admin/keys/:id")
+    }
+
+    /// POST /auth/token usando una API key cruda arbitraria.
+    pub async fn mint_with_key(&self, raw_key: &str, body: Value) -> reqwest::Response {
+        self.client
+            .post(format!("{}/auth/token", self.base))
+            .header("x-api-key", raw_key)
+            .json(&body)
+            .send()
+            .await
+            .expect("POST /auth/token (key cruda)")
+    }
+
+    /// POST /auth/token con cuerpo arbitrario.
+    pub async fn mint_request(&self, p: Project, body: Value) -> reqwest::Response {
+        self.client
+            .post(format!("{}/auth/token", self.base))
+            .header("x-api-key", self.key_for(p))
+            .json(&body)
+            .send()
+            .await
+            .expect("POST /auth/token")
+    }
+
+    /// Simula un fallo de la tabla de canales (la DB de keys sigue funcionando).
+    pub async fn drop_channels_table(&self) {
+        sqlx::query("DROP TABLE channels")
+            .execute(&self.state.keys.pool)
+            .await
+            .expect("DROP TABLE channels");
     }
 
     /// Igual que ws_open pero permite campos extra en el handshake (p.ej. client_id malicioso).

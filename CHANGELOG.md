@@ -120,6 +120,39 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
    (`server_shutdown`). Tarea periódica purga `revoked_tokens` expirados y
    entradas viejas del rate limiter/registro.
 
+
+### FASE 4.1 — Endurecimiento de autorización y validación
+
+#### Cambios incompatibles
+
+1. **`sub` (user_id) obligatorio en `/auth/token`**: sin `user_id` → 400. Máx 128
+   caracteres; charset `[A-Za-z0-9._@+-]`; prohibido `*` y `:`.
+   Migración: el backend debe enviar siempre el identificador de usuario real.
+
+2. **Rol exacto contra scopes**: `both` exige AMBOS scopes `publish` y `subscribe`
+   (antes un `contains` dejaba pasar `both` con un solo scope). `publish`/`subscribe`
+   exigen el scope correspondiente.
+
+3. **Scopes vivos en la autorización JWT**: retirar `publish`/`subscribe` a una key
+   invalida de inmediato los JWT viejos para esa acción (REST y WS), aunque el token
+   siga firmado y vigente.
+
+4. **Prefijos sin solape**: crear o editar una key con un `channel_prefix` que solape
+   con otra (incluido `*`) devuelve 400. Solape = mismo namespace o anidado
+   (`a:*` vs `a:b:*`), o comodín `*`.
+
+5. **Validación de canales**: nombre ≤128, charset `[A-Za-z0-9._@-]` por segmento,
+   segmentos no vacíos, sin `*`, y **no puede ser un UUID**; `description` ≤500.
+
+6. **Errores de DB → 500 (no 401/201 silenciosos)**: validación de API key,
+   persistencia de canales, borrado y carga al arranque propagan el error; se
+   registran en log y no se filtran detalles. **Creación de canales atómica**
+   (nombre reservado + persistencia con rollback; conflicto UNIQUE ⇒ 500).
+
+7. **Límite agregado de publicación por proyecto** en WS (default 500/s, además
+   del límite por conexión) y **watchdog configurable** (`auth_recheck_secs`,
+   default 10 s). Al superar el agregado: `rate_limited` y cierre.
+
 ### Nota de estado
 
 - La suite de integración en `tests/` define el comportamiento objetivo: los

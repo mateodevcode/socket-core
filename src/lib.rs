@@ -112,6 +112,7 @@ fn spawn_cleanup_task(state: AppState) {
             }
             state.limiter.cleanup();
             state.registry.cleanup();
+            state.publish_limits.cleanup();
         }
     });
 }
@@ -155,12 +156,15 @@ pub async fn init_state(cfg: &config::AppConfig) -> handlers::AppState {
         limiter: middleware::RateLimiter::new(),
         control,
         registry: limits::ConnectionRegistry::new(),
+        limits: limits::Limits::default(),
+        publish_limits: limits::ProjectPublishLimiters::new(),
     };
 
     // Restaurar canales persistidos (conservan sus IDs: los JWT siguen valiendo).
-    let restored = state.channel_manager.load_persisted(&state.keys.pool).await;
-    if restored > 0 {
-        tracing::info!("Canales restaurados: {}", restored);
+    match state.channel_manager.load_persisted(&state.keys.pool).await {
+        Ok(n) if n > 0 => tracing::info!("Canales restaurados: {}", n),
+        Ok(_) => {}
+        Err(e) => tracing::error!("no se pudieron cargar los canales: {}", e),
     }
     state
 }

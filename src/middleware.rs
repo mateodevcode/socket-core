@@ -106,10 +106,22 @@ pub async fn require_api_key(
     if raw.is_empty() {
         return Err((StatusCode::UNAUTHORIZED, "falta X-Api-Key".into()));
     }
-    let key = state.keys.validate(raw).await.ok_or((
-        StatusCode::UNAUTHORIZED,
-        "api key inválida, revocada o expirada".into(),
-    ))?;
+    let key = match state.keys.validate(raw).await {
+        Ok(Some(k)) => k,
+        Ok(None) => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "api key inválida, revocada o expirada".into(),
+            ))
+        }
+        Err(e) => {
+            tracing::error!("no se pudo validar la api key: {}", e);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "no se pudo verificar la credencial".into(),
+            ));
+        }
+    };
 
     let origin = request_origin(headers);
     if !origin_allowed(&key, origin.as_deref()) {

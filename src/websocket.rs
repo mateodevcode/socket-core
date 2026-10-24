@@ -1,12 +1,9 @@
 use crate::authz::{authorize_channel_for_jwt, AuthzError, ChannelAction};
 use crate::control::ControlEvent;
 use crate::handlers::AppState;
-use crate::limits::{
-    ConnectionRegistry, PublishWindow, WS_AUTH_RECHECK_SECS, WS_HANDSHAKE_TIMEOUT_SECS,
-    WS_IDLE_TIMEOUT_SECS, WS_MAX_MESSAGE_BYTES, WS_PING_INTERVAL_SECS,
-};
+use crate::limits::{ConnectionRegistry, PublishWindow};
 use crate::middleware::client_ip;
-use crate::models::{validate_outbound, ClientType, Event, MAX_PAYLOAD_BYTES, SYSTEM_SOURCE};
+use crate::models::{validate_outbound, ClientType, Event, SYSTEM_SOURCE};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -82,7 +79,12 @@ pub async fn websocket_handler(
 
     // Límite de conexiones por proyecto y por IP (slot reservado antes del upgrade).
     let ip = client_ip(&headers);
-    if !state.registry.try_register(&claims.project_id, &ip) {
+    if !state.registry.try_register(
+        &claims.project_id,
+        &ip,
+        state.limits.max_conns_project,
+        state.limits.max_conns_ip,
+    ) {
         warn!(
             "WS rechazado por límite de conexiones (proyecto {} ip {})",
             claims.project_id, ip
@@ -100,8 +102,8 @@ pub async fn websocket_handler(
         claims.project_name, claims.sub
     );
 
-    ws.max_message_size(WS_MAX_MESSAGE_BYTES)
-        .max_frame_size(WS_MAX_MESSAGE_BYTES)
+    ws.max_message_size(state.limits.max_message_bytes)
+        .max_frame_size(state.limits.max_message_bytes)
         .on_upgrade(move |socket| handle_socket(socket, state, claims, guard))
 }
 
@@ -140,7 +142,7 @@ async fn handle_socket(
     // Handshake con timeout: { "channel": "<id o nombre>", "device": "<opcional>" }.
     // La identidad NO la declara el cliente: es el `sub` del JWT.
     let first = tokio::time::timeout(
-        Duration::from_secs(WS_HANDSHAKE_TIMEOUT_SECS),
+        Duration::from_secs(state.limits.handshake_timeout_secs),
         receiver.next(),
     )
     .await;
@@ -247,12 +249,12 @@ async fn handle_socket(
     let jwt_exp = claims.exp;
 
     // Vigilantes periódicos de la conexión.
-    let mut auth_tick = tokio::time::interval(Duration::from_secs(WS_AUTH_RECHECK_SECS));
+    let mut auth_tick = tokio::time::interval(Duration::from_secs(state.limits.auth_recheck_secs));
     auth_tick.tick().await; // consume el tick inmediato
-    let mut ping_tick = tokio::time::interval(Duration::from_secs(WS_PING_INTERVAL_SECS));
+    let mut ping_tick = tokio::time::interval(Duration::from_secs(state.limits.ping_interval_secs));
     ping_tick.tick().await;
     let mut last_inbound = Instant::now();
-    let mut publish_window = PublishWindow::new();
+    let mut publish_window = PublishWindow::new(state.limits.publish_per_sec_conn);
 
     loop {
         let now = chrono::Utc::now().timestamp();
@@ -314,7 +316,7 @@ async fn handle_socket(
 
             // 3) Ping/pong e idle timeout.
             _ = ping_tick.tick() => {
-                if last_inbound.elapsed() > Duration::from_secs(WS_IDLE_TIMEOUT_SECS) {
+                if last_inbound.elapsed() > Duration::from_secs(state.limits.idle_timeout_secs) {
                     info!("WS {} inactivo demasiado tiempo", connection_id);
                     close_with(&mut sender, "idle_timeout", "sin actividad").await;
                     break;
@@ -362,11 +364,15 @@ async fn handle_socket(
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         last_inbound = Instant::now();
-                        if text.len() > MAX_PAYLOAD_BYTES {
+                        if text.len() > state.limits.max_message_bytes {
                             close_with(&mut sender, "message_too_large", "máximo 64 KB").await;
                             break;
                         }
-                        if !publish_window.allow() {
+                        if !publish_window.allow()
+                            || !state
+                                .publish_limits
+                                .allow(&claims.project_id, state.limits.publish_per_sec_project)
+                        {
                             close_with(&mut sender, "rate_limited", "demasiadas publicaciones por segundo").await;
                             break;
                         }

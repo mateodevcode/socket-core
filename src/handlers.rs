@@ -4,7 +4,7 @@ use crate::authz::{
 };
 use crate::channel_manager::ChannelManager;
 use crate::control::{ControlBus, ControlEvent};
-use crate::limits::ConnectionRegistry;
+use crate::limits::{ConnectionRegistry, Limits, ProjectPublishLimiters};
 use crate::middleware::{client_ip, require_api_key, require_jwt, require_master, RateLimiter};
 use crate::models::*;
 use axum::{
@@ -26,6 +26,8 @@ pub struct AppState {
     pub limiter: RateLimiter,
     pub control: ControlBus,
     pub registry: ConnectionRegistry,
+    pub limits: Limits,
+    pub publish_limits: ProjectPublishLimiters,
 }
 
 pub async fn health() -> impl IntoResponse {
@@ -71,28 +73,36 @@ pub async fn create_channel(
         Ok(k) => k,
         Err(v) => return err(v.0, v.1),
     };
-    if req.name.trim().is_empty() {
-        return err(StatusCode::BAD_REQUEST, "name requerido");
+    // Validación estructural del nombre/description ANTES de mirar prefijos.
+    if let Err(e) = crate::models::validate_channel_name(&req.name) {
+        return err(StatusCode::BAD_REQUEST, e);
     }
-    // El nombre SIEMPRE quedará bajo el prefijo del propio proyecto: si no es así,
-    // fuera (aunque la colisión sea con otro proyecto).
+    if let Err(e) = crate::models::validate_description(req.description.as_deref()) {
+        return err(StatusCode::BAD_REQUEST, e);
+    }
+    // El nombre SIEMPRE quedará bajo el prefijo del propio proyecto.
     if !crate::keys::channel_allowed(&key, &req.name) {
         return err(StatusCode::FORBIDDEN, "canal fuera de tu prefijo");
     }
-    match state
+    let channel =
+        match state
+            .channel_manager
+            .create_channel(key.id.clone(), req.name, req.description)
+        {
+            Ok(c) => c,
+            Err(_) => return err(StatusCode::BAD_REQUEST, "channel name already exists"),
+        };
+    // Persistencia atómica con la memoria: si falla, se deshace el alta (500).
+    if let Err(e) = state
         .channel_manager
-        .create_channel(key.id.clone(), req.name, req.description)
+        .persist(&state.keys.pool, &channel)
+        .await
     {
-        Ok(channel) => {
-            // Persistencia: el canal sobrevive a reinicios (los clientes no).
-            state
-                .channel_manager
-                .persist(&state.keys.pool, &channel)
-                .await;
-            (StatusCode::CREATED, Json(ApiResponse::ok(channel))).into_response()
-        }
-        Err(_) => err(StatusCode::BAD_REQUEST, "channel name already exists"),
+        tracing::error!("no se pudo persistir el canal {}: {}", channel.id, e);
+        state.channel_manager.remove_channel(&channel.id);
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
     }
+    (StatusCode::CREATED, Json(ApiResponse::ok(channel))).into_response()
 }
 
 pub async fn list_channels(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
@@ -160,11 +170,16 @@ pub async fn delete_channel(
         Ok(t) => t,
         Err(e) => return authz_err(e),
     };
+    // Primero la DB: si falla, el canal sigue operativo (500) y no hay divergencia.
+    if let Err(e) = sqlx::query("DELETE FROM channels WHERE id = ?")
+        .bind(&target_id)
+        .execute(&state.keys.pool)
+        .await
+    {
+        tracing::error!("no se pudo borrar el canal {} en DB: {}", target_id, e);
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+    }
     if state.channel_manager.remove_channel(&target_id) {
-        let _ = sqlx::query("DELETE FROM channels WHERE id = ?")
-            .bind(&target_id)
-            .execute(&state.keys.pool)
-            .await;
         // Cierra explícitamente las conexiones suscritas a este canal.
         state
             .control
@@ -257,21 +272,31 @@ pub async fn mint_token(
             "role debe ser publish|subscribe|both",
         );
     }
-    // El canal pedido debe estar dentro del prefijo del proyecto (salvo "*")
+    // Identidad obligatoria y saneada (la fija el backend del proyecto).
+    let user_id = match req.user_id {
+        Some(u) => u,
+        None => return err(StatusCode::BAD_REQUEST, "user_id (sub) es obligatorio"),
+    };
+    if let Err(e) = crate::models::validate_user_id(&user_id) {
+        return err(StatusCode::BAD_REQUEST, e);
+    }
+    // Patrón de canal válido y dentro del prefijo (salvo "*").
+    if let Err(e) = crate::models::validate_channel_pattern(&channel) {
+        return err(StatusCode::BAD_REQUEST, e);
+    }
     if channel != "*" && !crate::keys::channel_allowed(&key, &channel) {
         return err(StatusCode::FORBIDDEN, "canal fuera de tu prefijo");
     }
-    // El scope de la key debe cubrir el rol pedido
-    if role.contains("publish") && !crate::keys::has_scope(&key, "publish") {
+    // Rol EXACTO contra los scopes (nada de substring: "both" exige ambos).
+    let needs_publish = matches!(role.as_str(), "publish" | "both");
+    let needs_subscribe = matches!(role.as_str(), "subscribe" | "both");
+    if needs_publish && !crate::keys::has_scope(&key, "publish") {
         return err(StatusCode::FORBIDDEN, "key sin scope publish");
     }
-    if role.contains("subscribe") && !crate::keys::has_scope(&key, "subscribe") {
+    if needs_subscribe && !crate::keys::has_scope(&key, "subscribe") {
         return err(StatusCode::FORBIDDEN, "key sin scope subscribe");
     }
 
-    let user_id = req
-        .user_id
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     match create_jwt(
         &state.jwt_secret,
         state.jwt_ttl_secs,
@@ -339,6 +364,25 @@ pub async fn admin_create_key(
     if req.name.trim().is_empty() {
         return err(StatusCode::BAD_REQUEST, "name requerido");
     }
+    // Los prefijos no pueden solaparse entre proyectos (incluido "*").
+    let prefix = if req.channel_prefix.trim().is_empty() {
+        "*".to_string()
+    } else {
+        req.channel_prefix.trim().to_string()
+    };
+    match state.keys.prefix_conflicts(&prefix, None).await {
+        Ok(true) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "channel_prefix solapa con el de otro proyecto",
+            )
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::error!("admin_create_key: {}", e);
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+        }
+    }
     let expires_at = req
         .expires_in_days
         .map(|d| chrono::Utc::now().timestamp() + d * 86400);
@@ -347,7 +391,7 @@ pub async fn admin_create_key(
         .create(
             req.name,
             req.domains,
-            req.channel_prefix,
+            prefix,
             req.scopes,
             req.rate_limit_per_min,
             expires_at,
@@ -398,6 +442,26 @@ pub async fn admin_update_key(
 ) -> impl IntoResponse {
     if let Err((c, m)) = require_master(&headers, &state.master_key) {
         return err(c, m);
+    }
+    if let Some(prefix) = req.channel_prefix.as_deref() {
+        let normalized = if prefix.trim().is_empty() {
+            "*".to_string()
+        } else {
+            prefix.trim().to_string()
+        };
+        match state.keys.prefix_conflicts(&normalized, Some(&id)).await {
+            Ok(true) => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "channel_prefix solapa con el de otro proyecto",
+                )
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::error!("admin_update_key: {}", e);
+                return err(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+            }
+        }
     }
     match state
         .keys

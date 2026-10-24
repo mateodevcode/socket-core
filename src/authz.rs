@@ -2,7 +2,7 @@
 // Ningún endpoint ni el WS pueden saltarla ni mantener atajos paralelos.
 use crate::auth::Claims;
 use crate::channel_manager::ChannelManager;
-use crate::keys::{channel_allowed, ApiKey};
+use crate::keys::{channel_allowed, has_scope, ApiKey};
 use axum::http::StatusCode;
 use sqlx::SqlitePool;
 
@@ -88,8 +88,8 @@ pub async fn authorize_channel_for_jwt(
     action: ChannelAction,
 ) -> Result<String, AuthzError> {
     // La key que respaldó al JWT debe seguir viva: revocada, borrada o expirada => no vale.
-    let row = sqlx::query_as::<_, (i64, Option<i64>, String)>(
-        "SELECT revoked, expires_at, channel_prefix FROM api_keys WHERE id = ?",
+    let row = sqlx::query_as::<_, (i64, Option<i64>, String, String)>(
+        "SELECT revoked, expires_at, channel_prefix, scopes FROM api_keys WHERE id = ?",
     )
     .bind(&claims.project_id)
     .fetch_optional(pool)
@@ -98,7 +98,8 @@ pub async fn authorize_channel_for_jwt(
         tracing::error!("authz: error consultando key {}: {}", claims.project_id, e);
         AuthzError::Internal
     })?;
-    let (revoked, expires_at, live_prefix) = row.ok_or(AuthzError::InvalidCredential)?;
+    let (revoked, expires_at, live_prefix, live_scopes) =
+        row.ok_or(AuthzError::InvalidCredential)?;
     if revoked != 0 {
         return Err(AuthzError::InvalidCredential);
     }
@@ -125,7 +126,11 @@ pub async fn authorize_channel_for_jwt(
             .map(|p| p.trim().to_string())
             .filter(|p| !p.is_empty())
             .collect(),
-        scopes: vec![],
+        scopes: live_scopes
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
         rate_limit_per_min: 0,
         expires_at: None,
         revoked: false,
@@ -135,11 +140,20 @@ pub async fn authorize_channel_for_jwt(
         return Err(AuthzError::Forbidden);
     }
 
+    // Rol del claim + SCOPES VIVOS de la key (retirar un scope invalida JWT viejos).
     match action {
         ChannelAction::Manage => return Err(AuthzError::Forbidden),
-        ChannelAction::Publish if !claims.can_publish() => return Err(AuthzError::Forbidden),
-        ChannelAction::Subscribe if !claims.can_subscribe() => return Err(AuthzError::Forbidden),
-        _ => {}
+        ChannelAction::Publish => {
+            if !claims.can_publish() || !has_scope(&live_key, "publish") {
+                return Err(AuthzError::Forbidden);
+            }
+        }
+        ChannelAction::Subscribe => {
+            if !claims.can_subscribe() || !has_scope(&live_key, "subscribe") {
+                return Err(AuthzError::Forbidden);
+            }
+        }
+        ChannelAction::View => {}
     }
 
     if !claim_channel_covers(claims, &ch.name) {

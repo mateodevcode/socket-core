@@ -107,6 +107,91 @@ pub fn validate_outbound(
     Ok(())
 }
 
+pub const MAX_ID_LEN: usize = 128;
+pub const MAX_CHANNEL_NAME_LEN: usize = 128;
+pub const MAX_DESCRIPTION_LEN: usize = 500;
+
+/// Identidad de usuario (sub del JWT): obligatoria, <=128, charset seguro,
+/// sin comodines ni separador de canal.
+pub fn validate_user_id(s: &str) -> Result<(), String> {
+    if s.trim().is_empty() {
+        return Err("user_id (sub) es obligatorio".into());
+    }
+    if s.chars().count() > MAX_ID_LEN {
+        return Err(format!("user_id demasiado largo (max {})", MAX_ID_LEN));
+    }
+    if s.contains('*') || s.contains(':') {
+        return Err("user_id no puede contener '*' ni ':'".into());
+    }
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '@' | '+'))
+    {
+        return Err("user_id contiene caracteres no permitidos".into());
+    }
+    Ok(())
+}
+
+fn valid_segment(seg: &str) -> bool {
+    !seg.is_empty()
+        && seg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+fn validate_name_core(name: &str) -> Result<(), String> {
+    if name.chars().count() > MAX_CHANNEL_NAME_LEN {
+        return Err(format!(
+            "nombre de canal demasiado largo (max {})",
+            MAX_CHANNEL_NAME_LEN
+        ));
+    }
+    if name.starts_with(':') || name.ends_with(':') || name.contains("::") {
+        return Err("nombre de canal con segmento vacío".into());
+    }
+    if !name.split(':').all(valid_segment) {
+        return Err("nombre de canal con caracteres no permitidos".into());
+    }
+    Ok(())
+}
+
+/// Nombre de canal real: sin comodines, <=128, charset seguro, no puede ser un UUID.
+pub fn validate_channel_name(name: &str) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("name requerido".into());
+    }
+    if uuid::Uuid::parse_str(name).is_ok() {
+        return Err("un UUID no es un nombre de canal válido".into());
+    }
+    validate_name_core(name)
+}
+
+/// Patrón de canal para JWT: igual que un nombre o "prefijo:*".
+pub fn validate_channel_pattern(pattern: &str) -> Result<(), String> {
+    if pattern == "*" {
+        return Ok(());
+    }
+    if let Some(core) = pattern.strip_suffix(":*") {
+        if core.is_empty() {
+            return Err("prefijo de canal vacío".into());
+        }
+        return validate_name_core(core);
+    }
+    validate_channel_name(pattern)
+}
+
+pub fn validate_description(desc: Option<&str>) -> Result<(), String> {
+    if let Some(d) = desc {
+        if d.chars().count() > MAX_DESCRIPTION_LEN {
+            return Err(format!(
+                "description demasiado larga (max {})",
+                MAX_DESCRIPTION_LEN
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn depth_of(v: &serde_json::Value) -> usize {
     match v {
         serde_json::Value::Object(map) => 1 + map.values().map(depth_of).max().unwrap_or(0),

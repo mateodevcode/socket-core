@@ -1,7 +1,8 @@
 use crate::models::{Channel, ClientInfo, ClientType, Event};
 use dashmap::DashMap;
 use serde_json::json;
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use tracing::{debug, info};
 
@@ -10,6 +11,8 @@ pub type ChannelBroadcast = broadcast::Sender<Event>;
 #[derive(Clone)]
 pub struct ChannelManager {
     channels: Arc<DashMap<String, ChannelData>>,
+    /// Nombres reservados: garantiza creación atómica (sin carrera por nombre).
+    names: Arc<Mutex<HashSet<String>>>,
 }
 
 struct ChannelData {
@@ -22,6 +25,7 @@ impl ChannelManager {
     pub fn new() -> Self {
         Self {
             channels: Arc::new(DashMap::new()),
+            names: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -31,12 +35,15 @@ impl ChannelManager {
         name: String,
         description: Option<String>,
     ) -> Result<Channel, String> {
-        if self
-            .channels
-            .iter()
-            .any(|entry| entry.value().channel.name == name)
+        // Reserva atómica del nombre (evita carreras entre peticiones concurrentes).
         {
-            return Err(format!("Channel '{}' already exists", name));
+            let mut names = self
+                .names
+                .lock()
+                .map_err(|_| "internal error".to_string())?;
+            if !names.insert(name.clone()) {
+                return Err(format!("Channel '{}' already exists", name));
+            }
         }
 
         let channel = Channel::new(name, project_id, description);
@@ -215,12 +222,24 @@ impl ChannelManager {
     /// Elimina el canal de memoria. Los suscritos activos se desconectan solos
     /// (el broadcast se cierra al caer el último Sender).
     pub fn remove_channel(&self, channel_id: &str) -> bool {
-        self.channels.remove(channel_id).is_some()
+        let removed = self
+            .channels
+            .remove(channel_id)
+            .map(|(_, data)| data.channel.name);
+        if let Some(name) = removed {
+            if let Ok(mut names) = self.names.lock() {
+                names.remove(&name);
+            }
+            true
+        } else {
+            false
+        }
     }
 
     /// Guarda/actualiza el registro del canal en SQLite (los clientes no se persisten).
-    pub async fn persist(&self, pool: &sqlx::SqlitePool, ch: &Channel) {
-        let _ = sqlx::query(
+    /// FAIL-CLOSED: propaga el error para que el llamante haga rollback y devuelva 500.
+    pub async fn persist(&self, pool: &sqlx::SqlitePool, ch: &Channel) -> Result<(), sqlx::Error> {
+        sqlx::query(
             "INSERT INTO channels (id, name, project_id, description, created_at) VALUES (?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET name=excluded.name, project_id=excluded.project_id, description=excluded.description",
         )
@@ -230,22 +249,25 @@ impl ChannelManager {
         .bind(&ch.description)
         .bind(ch.created_at)
         .execute(pool)
-        .await;
+        .await?;
+        Ok(())
     }
 
     /// Recarga en memoria los canales persistidos (con broadcast y clientes frescos).
     /// Los IDs se conservan, así que los JWT atados a un canal siguen valiendo tras reinicios.
-    pub async fn load_persisted(&self, pool: &sqlx::SqlitePool) -> usize {
+    pub async fn load_persisted(&self, pool: &sqlx::SqlitePool) -> Result<usize, sqlx::Error> {
         let rows = sqlx::query_as::<_, (String, String, String, Option<String>, i64)>(
             "SELECT id, name, project_id, description, created_at FROM channels",
         )
         .fetch_all(pool)
-        .await
-        .unwrap_or_default();
+        .await?;
         let mut n = 0;
         for (id, name, project_id, description, created_at) in rows {
             if self.channels.contains_key(&id) {
                 continue;
+            }
+            if let Ok(mut names) = self.names.lock() {
+                names.insert(name.clone());
             }
             let (tx, _) = broadcast::channel(1000);
             self.channels.insert(
@@ -268,7 +290,7 @@ impl ChannelManager {
         if n > 0 {
             info!("Canales restaurados desde SQLite: {}", n);
         }
-        n
+        Ok(n)
     }
 }
 

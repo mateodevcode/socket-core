@@ -12,6 +12,8 @@ pub const WS_MAX_CONNECTIONS_PER_PROJECT: usize = 50;
 pub const WS_MAX_CONNECTIONS_PER_IP: usize = 20;
 /// Máximo de publicaciones por conexión en una ventana de 1 segundo.
 pub const WS_PUBLISH_PER_SEC: u32 = 50;
+/// Máximo de publicaciones AGREGADAS por proyecto en una ventana de 1 segundo.
+pub const WS_PUBLISH_PER_PROJECT_PER_SEC: u32 = 500;
 /// Intervalo de ping al cliente.
 pub const WS_PING_INTERVAL_SECS: u64 = 30;
 /// Sin actividad entrante durante este tiempo => conexión muerta.
@@ -24,6 +26,37 @@ pub const CLEANUP_INTERVAL_SECS: u64 = 300;
 pub const RATE_LIMITER_TTL_SECS: u64 = 120;
 
 use dashmap::DashMap;
+
+/// Límites configurables del hub (defaults seguros; tests pueden reducirlos).
+#[derive(Clone, Debug)]
+pub struct Limits {
+    pub max_message_bytes: usize,
+    pub handshake_timeout_secs: u64,
+    pub max_conns_project: usize,
+    pub max_conns_ip: usize,
+    pub publish_per_sec_conn: u32,
+    pub publish_per_sec_project: u32,
+    /// Cada cuánto revalida credenciales cada WS (watchdog).
+    pub auth_recheck_secs: u64,
+    pub ping_interval_secs: u64,
+    pub idle_timeout_secs: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_message_bytes: WS_MAX_MESSAGE_BYTES,
+            handshake_timeout_secs: WS_HANDSHAKE_TIMEOUT_SECS,
+            max_conns_project: WS_MAX_CONNECTIONS_PER_PROJECT,
+            max_conns_ip: WS_MAX_CONNECTIONS_PER_IP,
+            publish_per_sec_conn: WS_PUBLISH_PER_SEC,
+            publish_per_sec_project: WS_PUBLISH_PER_PROJECT_PER_SEC,
+            auth_recheck_secs: 10,
+            ping_interval_secs: WS_PING_INTERVAL_SECS,
+            idle_timeout_secs: WS_IDLE_TIMEOUT_SECS,
+        }
+    }
+}
 
 /// Contadores de conexiones activas por proyecto y por IP.
 #[derive(Clone, Default)]
@@ -38,17 +71,23 @@ impl ConnectionRegistry {
     }
 
     /// Reserva un slot ANTES del upgrade. false si se excede algún límite.
-    pub fn try_register(&self, project_id: &str, ip: &str) -> bool {
+    pub fn try_register(
+        &self,
+        project_id: &str,
+        ip: &str,
+        max_project: usize,
+        max_ip: usize,
+    ) -> bool {
         {
             let mut p = self.by_project.entry(project_id.to_string()).or_insert(0);
-            if *p >= WS_MAX_CONNECTIONS_PER_PROJECT {
+            if *p >= max_project {
                 return false;
             }
             *p += 1;
         }
         {
             let mut i = self.by_ip.entry(ip.to_string()).or_insert(0);
-            if *i >= WS_MAX_CONNECTIONS_PER_IP {
+            if *i >= max_ip {
                 // revertir el contador de proyecto
                 if let Some(mut p) = self.by_project.get_mut(project_id) {
                     *p = p.saturating_sub(1);
@@ -84,21 +123,23 @@ impl ConnectionRegistry {
     }
 }
 
-/// Ventana fija de 1 segundo para el rate limit de publicación por conexión.
+/// Ventana fija de 1 segundo para el rate limit de publicación.
 pub struct PublishWindow {
     window_start: Instant,
     count: u32,
+    limit: u32,
 }
 
 impl PublishWindow {
-    pub fn new() -> Self {
+    pub fn new(limit: u32) -> Self {
         Self {
             window_start: Instant::now(),
             count: 0,
+            limit,
         }
     }
 
-    /// true si la publicación está permitida; false si debe cerrarse la conexión.
+    /// true si la publicación está permitida; false si se excedió el límite.
     pub fn allow(&mut self) -> bool {
         let now = Instant::now();
         if now.duration_since(self.window_start) >= Duration::from_secs(1) {
@@ -106,13 +147,51 @@ impl PublishWindow {
             self.count = 0;
         }
         self.count += 1;
-        self.count <= WS_PUBLISH_PER_SEC
+        self.count <= self.limit
+    }
+
+    pub fn is_stale(&self) -> bool {
+        self.window_start.elapsed() > Duration::from_secs(RATE_LIMITER_TTL_SECS)
     }
 }
 
 impl Default for PublishWindow {
     fn default() -> Self {
-        Self::new()
+        Self::new(WS_PUBLISH_PER_SEC)
+    }
+}
+
+/// Ventanas de publicación AGREGADA por proyecto (compartidas entre conexiones).
+#[derive(Clone, Default)]
+pub struct ProjectPublishLimiters {
+    inner: Arc<DashMap<String, Arc<std::sync::Mutex<PublishWindow>>>>,
+}
+
+impl ProjectPublishLimiters {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn allow(&self, project_id: &str, limit: u32) -> bool {
+        let window: Arc<std::sync::Mutex<PublishWindow>> = {
+            let entry = self
+                .inner
+                .entry(project_id.to_string())
+                .or_insert_with(|| Arc::new(std::sync::Mutex::new(PublishWindow::new(limit))));
+            Arc::clone(&entry)
+        };
+        let allowed = match window.lock() {
+            Ok(mut w) => w.allow(),
+            Err(_) => false, // mutex envenenado => denegar (fail-closed)
+        };
+        allowed
+    }
+
+    pub fn cleanup(&self) {
+        self.inner.retain(|_, w| match w.lock() {
+            Ok(win) => !win.is_stale(),
+            Err(_) => false,
+        });
     }
 }
 
@@ -123,7 +202,7 @@ mod tests {
     #[test]
     fn registry_limits_and_cleanup() {
         let reg = ConnectionRegistry::new();
-        assert!(reg.try_register("p1", "ip1"));
+        assert!(reg.try_register("p1", "ip1", 50, 20));
         assert_eq!(reg.project_count("p1"), 1);
         reg.unregister("p1", "ip1");
         assert_eq!(reg.project_count("p1"), 0);
@@ -134,10 +213,20 @@ mod tests {
 
     #[test]
     fn publish_window_caps_per_second() {
-        let mut w = PublishWindow::new();
-        for _ in 0..WS_PUBLISH_PER_SEC {
+        let mut w = PublishWindow::new(5);
+        for _ in 0..5 {
             assert!(w.allow());
         }
         assert!(!w.allow(), "debe cortar al superar el límite por segundo");
+    }
+
+    #[test]
+    fn project_publish_limiter_agrega_entre_llamadas() {
+        let l = ProjectPublishLimiters::new();
+        assert!(l.allow("p", 3));
+        assert!(l.allow("p", 3));
+        assert!(l.allow("p", 3));
+        assert!(!l.allow("p", 3), "el límite agregado debe aplicar");
+        assert!(l.allow("otro", 3), "otro proyecto tiene su propia ventana");
     }
 }

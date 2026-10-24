@@ -308,23 +308,53 @@ impl KeyStore {
     }
 
     /// Valida key cruda: hash, revocada, expirada.
-    pub async fn validate(&self, raw_key: &str) -> Option<ApiKey> {
+    /// FAIL-CLOSED: los errores de DB se propagan (el llamante responde 500, no 401).
+    pub async fn validate(&self, raw_key: &str) -> Result<Option<ApiKey>, sqlx::Error> {
         let hash = hash_key(raw_key);
         let row = sqlx::query_as::<_, ApiKeyRow>("SELECT * FROM api_keys WHERE key_hash = ?")
             .bind(hash)
             .fetch_optional(&self.pool)
-            .await
-            .ok()??;
+            .await?;
+        let Some(row) = row else { return Ok(None) };
         let key = ApiKey::from(row);
         if key.revoked {
-            return None;
+            return Ok(None);
         }
         if let Some(exp) = key.expires_at {
             if Utc::now().timestamp() > exp {
-                return None;
+                return Ok(None);
             }
         }
-        Some(key)
+        Ok(Some(key))
+    }
+
+    /// Comprueba si el prefijo indicado solapa con alguna otra key.
+    /// "*" solapa con todo; "a:*" solapa con "a:*", "a:b:*", "a", etc.
+    pub async fn prefix_conflicts(
+        &self,
+        prefix_s: &str,
+        exclude_id: Option<&str>,
+    ) -> Result<bool, sqlx::Error> {
+        let wanted = prefix_bases(prefix_s);
+        if wanted.is_empty() {
+            return Ok(false);
+        }
+        let rows = sqlx::query_as::<_, (String, String)>("SELECT id, channel_prefix FROM api_keys")
+            .fetch_all(&self.pool)
+            .await?;
+        for (id, existing) in rows {
+            if Some(id.as_str()) == exclude_id {
+                continue;
+            }
+            for b in prefix_bases(&existing) {
+                for w in &wanted {
+                    if bases_overlap(w, &b) {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// Comprueba que el proyecto (key) sigue existiendo, activo y vigente.
@@ -424,6 +454,27 @@ fn host_of(url_or_origin: &str) -> String {
         .next()
         .unwrap_or(s)
         .to_string()
+}
+
+fn prefix_bases(prefix_s: &str) -> Vec<String> {
+    prefix_s
+        .split(',')
+        .map(|p| p.trim().trim_end_matches(":*").trim())
+        .filter(|p| !p.is_empty())
+        .map(|p| p.to_string())
+        .collect()
+}
+
+fn bases_overlap(a: &str, b: &str) -> bool {
+    if a == "*" || b == "*" {
+        return true;
+    }
+    if a == b {
+        return true;
+    }
+    let a_ns = format!("{}:", a);
+    let b_ns = format!("{}:", b);
+    b.starts_with(&a_ns) || a.starts_with(&b_ns)
 }
 
 /// Canal permitido: prefixes ["*"] o ["a:*","jarvis:*"] o exactos.
