@@ -251,7 +251,7 @@ sección de cada fase.
 
 1. **Dockerfile endurecido**: imagen base fijada por versión (`rust:1.97-bookworm`,
    `debian:bookworm-slim`), usuario sin privilegios **UID/GID 10001** (sin shell),
-   `HEALTHCHECK` propio contra `/health` y sin paquetes innecesarios.
+   `HEALTHCHECK` propio contra `/health`; se instala `curl` (lo usan el healthcheck y `docker exec`).
 
 2. **docker-compose**: `read_only: true`, `cap_drop: [ALL]`,
    `no-new-privileges:true`, `tmpfs /tmp`, límites de memoria (256 MB), CPU (1.0) y
@@ -365,6 +365,25 @@ sección de cada fase.
    entra en bucle de reintentos. Test: `credential_revoked durante renovación`.
 4. `README.md` saneado (sin dominio real ni nombres de clientes) y actualizado al
    comportamiento real; `SECURITY.md` revisado y enlazado con los nuevos docs.
+
+### Verificación previa al despliegue (Parte B)
+
+- **B3**: 8 tests JWT (alg none, HS384, sin `aud`, `aud`/`iss` ajenos, expirado,
+  firma con otro secreto y `sc_live_` como token) contra REST y WS → 401.
+- **B4**: mutaciones manuales de 6 tests críticos; todos fallan al romper el código
+  (XFF, `/admin` público, auditoría, lockout, rol `both`, scopes vivos). Sin cambios
+  de código (solo verificación).
+- **B6 (SDK)**: se elimina el cliente WS casero (se exige `WebSocket` global, Node
+  ≥ 22); `tokenProvider` 401/403 → `fatal` y 5xx/red → backoff; throttle ≥220 ms
+  entre tokens (5 req/s); dedupe acotado a 1000 ids; `close()` limpia timers/sockets;
+  el ejemplo cuenta conexiones por usuario durante el solape de renovación.
+- **B7**: el error de solape de prefijos **nombra la key** (incluidas revocadas) y
+  `alta_cliente.py` explica cómo liberar el prefijo (borrar/editar la key).
+- **B2**: deploy con espera de 60 s a ambos `/health` y **rollback automático**
+  (commit previo + backup + rebuild + verificación; job `exit 1`).
+- **B1**: documentado el UPDATE manual para asignar canales huérfanos en
+  `docs/DESPLIEGUE.md`.
+
 ### Nota de estado
 
 - La suite de integración en `tests/` define el comportamiento objetivo: los

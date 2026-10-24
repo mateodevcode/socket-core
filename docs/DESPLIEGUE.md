@@ -79,6 +79,27 @@ Si hay huérfanos esperados, decide antes de desplegar: renombrar el canal, ajus
 el prefijo de una key, o aceptar que queden inaccesibles. NO borres filas a mano
 sin backup.
 
+**Asignar un canal huérfano a un proyecto (manual, sobre la copia primero):**
+
+```sql
+-- Repite por cada canal huérfano, eligiendo la key dueña por su nombre.
+-- (Ajusta 'proyecto-demo' y 'canal-huerfano' a tus datos reales.)
+UPDATE channels
+SET project_id = (SELECT id FROM api_keys WHERE name = 'proyecto-demo')
+WHERE project_id = '' AND name = 'canal-huerfano';
+```
+
+Verifica dentro de la copia:
+
+```bash
+sqlite3 /tmp/migracion-prueba.db "SELECT COUNT(*) FROM channels WHERE project_id='';"
+```
+
+Después, en el deploy real (con backup hecho): aplica el UPDATE sobre
+`data/socket-core.db` con el servicio parado, `sudo chown -R 10001:10001 data`, y
+arranca. Un canal huérfano (`project_id=''`) hoy es **invisible para todos**
+(responde 404) hasta asignarle dueño.
+
 > Si no tienes `sqlite3` en el host, puedes consultar el recuento desde el
 > contenedor con `docker exec` usando python3, o revisar los logs del arranque:
 > la migración informa `Migración de canales: N repartidos por prefijo`.
@@ -114,9 +135,19 @@ Resumen (detalle y migración en `CHANGELOG.md`):
 
 ## 1. Despliegue
 
+> **Primer despliegue de esta rama (manual):** no fusiones a `main` todavía.
+> Despliega la rama a mano con `docker compose logs -f socket-core` abierto en otra
+> terminal para ver el arranque y cualquier fallo; verifica `/health`, `estado.py` y
+> un mensaje de prueba. Solo después fusiona a `main` para que el workflow automático
+> tome el relevo.
+
 El despliegue es automático: push a `main` → workflow **CI** (`quality`) → si pasa,
-job **deploy** (needs) entra por SSH, hace backup, actualiza, reconstruye y
-verifica. No se despliega si CI falla.
+job **deploy** (needs) entra por SSH, hace backup, actualiza, reconstruye y espera
+hasta **60 s** a que `/health` responda en el puerto público **y** en el admin dentro
+del contenedor. Si no responde, hace **rollback automático**: vuelve al commit de
+`.last_deploy_commit`, restaura el backup más reciente, reconstruye, reverifica 60 s
+y **marca el job como fallido** (`exit 1`) para que se investigue. No se despliega
+si CI falla.
 
 Manual (solo si es necesario):
 

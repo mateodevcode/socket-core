@@ -154,6 +154,9 @@ endpoint (`/socket-token`), que a su vez pide el JWT al hub con la API key. El
 token viaja en `?token=` (el navegador no permite cabeceras en WS) y Nginx está
 configurado para **no registrar query strings**.
 
+El SDK funciona en navegador y **Node.js ≥ 22** (WebSocket nativo; sin cliente
+propio).
+
 ```js
 import { connect } from "./socket-core.mjs";
 const sc = connect({
@@ -218,6 +221,11 @@ Con `JWT_TTL_SECS=600`, el SDK renueva ~60 s antes de expirar: abre una **nueva*
 conexión, espera su handshake y cierra la vieja. Mientras se solapan, deduplica
 eventos por `id`. Si el servidor cierra por expiración, el código es
 `token_expired` y el SDK reconecta pidiendo otro JWT.
+
+Durante el solape hay **dos conexiones del mismo usuario**: el `client_left` de la
+vieja puede llegar cuando la nueva ya está activa. En la UI hay que **contar
+conexiones por usuario** (el chat de `examples/` lo hace) para no marcar al usuario
+como desconectado si aún le queda una.
 
 Ejecución real con un hub de TTL=60 s para forzar la renovación en segundos
 (producción usa 600 s):
@@ -476,5 +484,6 @@ Ejemplo completo ejecutable: `examples/README.md` (backend Express + chat).
 - **Rate limit por IP** depende de una correcta `TRUSTED_PROXIES`; mal configurada,
   todos los clientes comparten el cupo del gateway.
 - **Reserva de prefijos**: una key revocada sigue ocupando su prefijo hasta que se
-  borra o se edita (el solape incluye keys revocadas). Bórrala o cámbiale el prefijo
-  antes de reutilizarlo.
+  borra o se edita (el solape incluye keys revocadas). El error del servidor nombra
+  la key que ocupa el prefijo (sin secretos); bórrala o cámbiale el prefijo para
+  liberarlo.
