@@ -139,7 +139,7 @@ Resumen (detalle y migración en `CHANGELOG.md`):
 > tome el relevo.
 
 El despliegue es automático: push a `main` → workflow **CI** (`quality`) → si pasa,
-job **deploy** (needs de quality/sdk/python/docker) exige el entorno
+job **deploy** (needs de quality/sdk/python/docker/nginx/fail2ban) exige el entorno
 **`production`** (con revisor) y ejecuta por SSH el script versionado
 `scripts/deploy.sh` desde `origin/main`. El script:
 - hace un **backup consistente** de SQLite (API backup + `integrity_check`),
@@ -168,9 +168,9 @@ Notas del contenedor: `read_only: true`, `cap_drop: ALL`, `no-new-privileges`,
 
 - `SHUTDOWN_GRACE_SECS` debe ser **1–19** (el compose usa `stop_grace_period: 20s`);
   el arranque rechaza 0 o ≥20.
-- `restart: on-failure:5`: tras 5 fallos seguidos el contenedor queda parado para no
-  entrar en bucle. Revisa `docker compose logs` y vuelve a `up -d` tras corregir.
-  Alternativa: `unless-stopped` (reintenta indefinidamente; enmascara crash loops).
+- `restart: unless-stopped`: el contenedor se reinicia tras caídas, pero no tras un
+  `docker stop` manual. `on-failure:5` no se adoptó porque no se probó ante reinicios
+  del daemon/VPS. Revisa `docker compose logs` si hay bucles.
 - **`env_file` expone secretos** en `docker inspect socket-core` y
   `docker exec socket-core env`. Quien tenga acceso al socket Docker los ve (es
   equivalente a root). Mantén `.env` en 600 y restringe el acceso al daemon.
@@ -230,9 +230,9 @@ PREV=$(cat .last_good_commit)
 git fetch origin
 git reset --hard "$PREV"
 
-# 2) Restaurar los datos previos (elige el backup anterior al fallo)
-ls -1t backups/data-*.tgz | head
-sudo tar xzf backups/data-AAAAMMDD-HHMMSS.tgz -C /srv/infra/socket-core
+# 2) Restaurar los datos previos (copia .db consistente; elige la anterior al fallo)
+ls -1t backups/data-*.db | head
+sudo python3 scripts/sqlite_backup.py restore   --backup backups/data-AAAAMMDD-HHMMSS.db --db data/socket-core.db
 sudo chown -R 10001:10001 data
 
 # 3) Reconstruir y arrancar
