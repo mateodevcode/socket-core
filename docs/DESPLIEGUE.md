@@ -50,25 +50,28 @@ La migración añade `project_id` a `channels` y asigna dueño por prefijo. Los
 canales cuyo nombre no encaja con el prefijo de ninguna key quedan **huérfanos**
 (`project_id=''`, invisibles: 404 para todos).
 
+> **Aclaración:** la prueba ejecutada en este repo fue sobre una copia
+> **SINTÉTICA** (el repositorio no contiene `data/socket-core.db`). Los canales
+> `demo:chat`/`orphan:x` de la salida de ejemplo son de laboratorio, no datos reales.
+
+Comandos EXACTOS para probar sobre una copia de TU DB real:
+
 ```bash
 cd /srv/infra/socket-core
-cp data/socket-core.db /tmp/migracion-prueba.db
+mkdir -p /tmp/migcheck
+sudo cp data/socket-core.db /tmp/migcheck/hub.db
+sudo chown -R 10001:10001 /tmp/migcheck   # el contenedor corre como UID 10001
 
-# Arranca una instancia temporal contra la copia (puertos altos, sin tocar el servicio)
-docker run --rm -v /tmp/migracion-prueba.db:/tmp/hub.db \
-  -e APP_ENV=dev -e PORT=39905 -e ADMIN_PORT=39915 \
-  -e JWT_SECRET="$(openssl rand -hex 64)" -e MASTER_KEY="$(openssl rand -hex 32)" \
-  -e DATABASE_URL="sqlite:/tmp/hub.db?mode=rwc" -e ALLOW_BOOTSTRAP=false \
-  -p 127.0.0.1:39905:39905 socket-core:latest &
-sleep 3
-# (La instancia sale sola al terminar; si no, docker stop)
+docker run -d --name sc-mig-check   -v /tmp/migcheck:/app/data   -e APP_ENV=dev -e PORT=3005 -e ADMIN_PORT=3015   -e JWT_SECRET="$(openssl rand -hex 64)" -e MASTER_KEY="$(openssl rand -hex 32)"   -e DATABASE_URL="sqlite:/app/data/hub.db?mode=rwc" -e ALLOW_BOOTSTRAP=false   socket-core:latest
+sleep 5
+docker logs sc-mig-check 2>&1 | tail -8    # ver "Migración de canales: N ..."
+docker stop sc-mig-check && docker rm sc-mig-check
 
-# Recuento de huérfanos en la copia (requiere sqlite3 en el host)
-sqlite3 /tmp/migracion-prueba.db "SELECT COUNT(*) FROM channels WHERE project_id='';"
-sqlite3 /tmp/migracion-prueba.db "SELECT name FROM channels WHERE project_id='';"
+sqlite3 /tmp/migcheck/hub.db "SELECT COUNT(*) FROM channels WHERE project_id='';"
+sqlite3 /tmp/migcheck/hub.db "SELECT name FROM channels WHERE project_id='';"
 ```
 
-Salida real de una migración de prueba (canal con dueño por prefijo + uno huérfano):
+Salida de la prueba **sintética** de este repo:
 
 ```text
 canales: [('demo:chat', 'legacy-key'), ('orphan:x', '')]
@@ -82,33 +85,20 @@ sin backup.
 **Asignar un canal huérfano a un proyecto (manual, sobre la copia primero):**
 
 ```sql
--- Repite por cada canal huérfano, eligiendo la key dueña por su nombre.
--- (Ajusta 'proyecto-demo' y 'canal-huerfano' a tus datos reales.)
 UPDATE channels
 SET project_id = (SELECT id FROM api_keys WHERE name = 'proyecto-demo')
 WHERE project_id = '' AND name = 'canal-huerfano';
 ```
 
-Verifica dentro de la copia:
-
-```bash
-sqlite3 /tmp/migcheck/hub.db "SELECT COUNT(*) FROM channels WHERE project_id='';"
-```
-
-Después, en el deploy real (con backup hecho): aplica el UPDATE sobre
-`data/socket-core.db` con el servicio parado, `sudo chown -R 10001:10001 data`, y
-arranca. Un canal huérfano (`project_id=''`) hoy es **invisible para todos**
-(responde 404) hasta asignarle dueño.
+Verifica en la copia con `sqlite3 /tmp/migcheck/hub.db "SELECT COUNT(*) FROM channels WHERE project_id='';"`
+(o con python3 si no tienes sqlite3). Después, en el deploy real (con backup hecho):
+aplica el UPDATE sobre `data/socket-core.db` con el servicio parado,
+`sudo chown -R 10001:10001 data`, y arranca.
 
 > **Tests de red:** `admin_no_escucha_en_otra_interfaz` requiere una interfaz
 > no-loopback. Si el entorno no la tiene, el test **falla** para no dar falsos
 > positivos; define `SKIP_NET_IFACE_TEST=1` para omitirlo explícitamente (p. ej. CI
 > sin red externa).
-
-> Si no tienes `sqlite3` en el host, puedes consultar la copia con python3:
-> `python3 -c "import sqlite3;c=sqlite3.connect('/tmp/migcheck/hub.db');print(c.execute(\"SELECT COUNT(*) FROM channels WHERE project_id=''\").fetchone()[0])"`
-> o revisar los logs del arranque: la migración informa
-> `Migración de canales: N repartidos por prefijo`.
 
 ### 0.3 Backup de la DB
 
@@ -116,12 +106,13 @@ arranca. Un canal huérfano (`project_id=''`) hoy es **invisible para todos**
 cd /srv/infra/socket-core
 mkdir -p backups
 STAMP=$(date +%Y%m%d-%H%M%S)
-sudo tar czf "backups/data-$STAMP.tgz" data
-echo "backup: backups/data-$STAMP.tgz"
+# Backup consistente (API de sqlite + PRAGMA integrity_check), sin tar en caliente.
+sudo python3 scripts/sqlite_backup.py backup   --db data/socket-core.db --out "backups/data-$STAMP.db"
+echo "backup: backups/data-$STAMP.db"
 ```
 
-El propio deploy automático hace también este backup (retención de 10) y guarda el
-commit previo en `.last_good_commit`.
+El deploy automático hace este backup (retención de 10) y guarda el commit sano en
+`.last_good_commit` **solo** tras salud + chequeo público.
 
 ### 0.4 Avisa a los clientes de los cambios incompatibles
 
@@ -288,21 +279,9 @@ Activación:
   Revisa `bantime.increment` y los logs de recidive para no bloquear IPs legítimas.
 - Solo cuentan 401/403; los 429 (rate limit) **no** se banean.
 
-## 6. sudoers restringido para el deploy
+## 6. Sudoers del deploy
 
-`docs/sudoers-deploy.example` contiene un `Cmnd_Alias` con los comandos exactos del
-script (docker compose/build/exec, nginx -t, systemctl reload, certbot, fail2ban,
-cp/ln/chown/rm acotados a rutas y python del backup). **No se aplica automáticamente.**
-
-Probar antes de instalar:
-```bash
-visudo -cf docs/sudoers-deploy.example      # valida sintaxis
-sudo visudo -c                              # si lo instalas, valida el conjunto
-sudo -l -U deploy                           # revisa qué puede ejecutar
-```
-Si el usuario de CI no es root, define `SUDO=sudo` (por defecto) y asegúrate de que
-el alias cubre **todas** las rutas reales; cualquier comando nuevo en el script
-requiere actualizar el sudoers.
+Ver **§10** y `docs/sudoers-deploy.example`. No se aplica automáticamente.
 
 ## 7. Qué script de deploy se ejecuta
 
@@ -322,8 +301,7 @@ con permisos 0600:
 
 ```bash
 sudo install -d -m 0700 /etc/socket-core
-sudo sh -c 'umask 077; printf "SOCKET_MASTER_KEY=%s
-" "<MASTER_KEY>" > /etc/socket-core/estado.env'
+sudo sh -c 'umask 077; printf "SOCKET_MASTER_KEY=%s\n" "<MASTER_KEY>" > /etc/socket-core/estado.env'
 sudo chown root:root /etc/socket-core/estado.env
 sudo chmod 600 /etc/socket-core/estado.env
 ```
