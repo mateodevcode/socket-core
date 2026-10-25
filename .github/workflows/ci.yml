@@ -37,11 +37,14 @@ jobs:
       - name: Tests
         run: cargo test --locked --all-targets
 
+      - name: Verificar SHAs de actions
+        run: python3 scripts/verify_action_shas.py
+
       - name: Shellcheck del deploy
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y shellcheck
-          shellcheck scripts/deploy.sh
+          shellcheck scripts/deploy.sh scripts/test_fail2ban.sh
 
       - name: Documentación ejecutable
         run: |
@@ -155,10 +158,40 @@ jobs:
         if: always()
         run: docker rm -f sc-ci >/dev/null 2>&1 || true
 
+  nginx:
+    name: Nginx (config y rutas)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.ref }}-nginx
+      cancel-in-progress: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Pruebas reales de nginx
+        run: python3 scripts/test_nginx.py
+
+  fail2ban:
+    name: fail2ban (filtro)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.ref }}-fail2ban
+      cancel-in-progress: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Instalar fail2ban
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y fail2ban
+      - name: Validar filtro
+        run: bash scripts/test_fail2ban.sh
+
   deploy:
     name: Despliegue al VPS
     # needs: el deploy NO arranca si falla cualquier job.
-    needs: [quality, sdk, python, docker]
+    needs: [quality, sdk, python, docker, nginx, fail2ban]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30

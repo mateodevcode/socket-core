@@ -255,3 +255,60 @@ docker exec socket-core curl -fsS http://127.0.0.1:3005/health
 Si el rollback es por un cambio incompatible de datos (migración), restaurar el
 backup devuelve el esquema anterior: **el binario antiguo volverá a leer su DB**.
 No mezcles binario nuevo con backup viejo ni al contrario sin probarlo en una copia.
+
+
+## 4. Variante: solo /ws público
+
+Si **todos los backends** están en `central_network` (usan `http://socket-core:3005`)
+y no necesitas REST público, puedes dejar expuesto solo el WebSocket. Sustituye en
+`nginx/ws.seventwo.tech.https.conf` las locations de `/health`, `/stats` y
+`/channels` por:
+
+```nginx
+location /admin/ { return 404; }
+location /ws { ...igual que ahora... }
+location / { return 404; }
+```
+
+Activación:
+1. Edita el fichero en el repo (no en el VPS).
+2. `sudo nginx -t` (con backup previo; el deploy lo hace solo).
+3. `sudo systemctl reload nginx`.
+4. Verifica `curl -k -H 'Host: ws...' https://.../channels` => 404 y que el WS
+   sigue funcionando. Si algo falla, restaura el backup de Nginx.
+
+## 5. fail2ban: alcance y recidive
+
+- La jail usa `port = http,https`, por lo que un baneo afecta a **80/443 de TODOS
+  los dominios** de ese VPS (no solo al hub). Tenlo en cuenta antes de bajar
+  `maxretry`.
+- `ignoreip` excluye loopback y `172.18.0.0/16` (red Docker).
+- Interacción con **recidive**: si tienes la jail `recidive` activa, los baneos
+  repetidos de `socketcore-auth` pueden acabar en baneos más largos/generales.
+  Revisa `bantime.increment` y los logs de recidive para no bloquear IPs legítimas.
+- Solo cuentan 401/403; los 429 (rate limit) **no** se banean.
+
+## 6. sudoers restringido para el deploy
+
+`docs/sudoers-deploy.example` contiene un `Cmnd_Alias` con los comandos exactos del
+script (docker compose/build/exec, nginx -t, systemctl reload, certbot, fail2ban,
+cp/ln/chown/rm acotados a rutas y python del backup). **No se aplica automáticamente.**
+
+Probar antes de instalar:
+```bash
+visudo -cf docs/sudoers-deploy.example      # valida sintaxis
+sudo visudo -c                              # si lo instalas, valida el conjunto
+sudo -l -U deploy                           # revisa qué puede ejecutar
+```
+Si el usuario de CI no es root, define `SUDO=sudo` (por defecto) y asegúrate de que
+el alias cubre **todas** las rutas reales; cualquier comando nuevo en el script
+requiere actualizar el sudoers.
+
+## 7. Qué script de deploy se ejecuta
+
+Hoy `ci.yml` hace, por SSH: `git show origin/main:scripts/deploy.sh | bash -s`, es
+decir, **siempre el script de origin/main** (aunque el working tree esté viejo).
+Además, `deploy.sh` compara el script de origin con el que se está ejecutando y, si
+difieren, se **re-ejecuta** desde la versión nueva (protege ejecuciones manuales de
+una copia vieja). El commit sano se guarda en `.last_good_commit` **solo** tras
+salud + chequeo público.

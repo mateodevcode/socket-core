@@ -84,3 +84,27 @@ fn compose_espera_mas_que_la_gracia_de_apagado() {
         "compose debe definir stop_grace_period: 20s (> SHUTDOWN_GRACE_SECS)"
     );
 }
+
+#[test]
+fn nginx_superficie_y_compose_unless_stopped() {
+    let lim = std::fs::read_to_string("nginx/conf.d/socketcore-limits.conf").unwrap();
+    assert!(lim.contains("limit_conn_status 429;"));
+    assert!(lim.contains("map $http_upgrade $connection_upgrade"));
+    let site = std::fs::read_to_string("nginx/ws.seventwo.tech.https.conf").unwrap();
+    assert!(site.contains("limit_conn ws_conn 30;"));
+    assert!(site.contains("proxy_set_header Connection $connection_upgrade;"));
+    assert!(site.contains("location /admin/ {"));
+    assert!(site.contains("return 404;"));
+    for loc in [
+        "location = /health",
+        "location = /auth/token",
+        "location /ws",
+        "location /channels",
+        "location = /stats",
+        "location / {",
+    ] {
+        assert!(site.contains(loc), "falta {}", loc);
+    }
+    let dc = std::fs::read_to_string("docker-compose.yml").unwrap();
+    assert!(dc.contains("restart: unless-stopped"));
+}

@@ -4,9 +4,9 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: socket-core
-    # on-failure:5 evita bucles infinitos de crash; tras 5 fallos queda parado y hay
-    # que revisar logs. (Alternativa: unless-stopped, pero puede reintentar sin fin.)
-    restart: on-failure:5
+    # unless-stopped: on-failure:5 no garantiza sobrevivir a reinicios del daemon/VPS
+    # (no se ha probado ese escenario). Revisa `docker compose logs` si hay bucles.
+    restart: unless-stopped
     # Debe ser > SHUTDOWN_GRACE_SECS (validado <20) para permitir el apagado limpio.
     stop_grace_period: 20s
     # Endurecimiento: FS de solo lectura, sin capabilities, sin escalada.

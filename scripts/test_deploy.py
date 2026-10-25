@@ -26,7 +26,11 @@ git() {
       if [[ "$target" == origin/* ]]; then cat "$FAKE_STATE/origin" > "$FAKE_STATE/head"
       elif [ "$target" = "HEAD" ]; then :
       else echo "$target" > "$FAKE_STATE/head"; fi ;;
-    show) cat "$FAKE_HELPER" ;;
+    show)
+      case "$2" in
+        *sqlite_backup.py) cat "$FAKE_HELPER" ;;
+        *deploy.sh) printf '%s' "$FAKE_DEPLOY" ;;
+      esac ;;
     *) : ;;
   esac
   return 0
@@ -154,6 +158,7 @@ class Scenario:
             "SKIP_CERTBOT": "1",
             "FAKE_STATE": str(self.state),
             "FAKE_HELPER": str(HELPER),
+            "FAKE_DEPLOY": DEPLOY.read_text(encoding="utf-8"),
             "REAL_PYTHON": shutil.which("python") or "python",
             "FAKE_BUILD_FAIL": "0",
             "FAKE_ADMIN_HEALTH": "0",
@@ -234,6 +239,13 @@ class TestDeploy(unittest.TestCase):
         self.assertNotIn(".env.bak", texto)
         self.assertNotIn("cp .env /tmp", texto)
         self.assertIn("umask 077", texto)
+
+    def test_reejecuta_si_el_script_de_origin_difiere(self):
+        nuevo = DEPLOY.read_text(encoding="utf-8") + "\n# origen-v2\n"
+        r = self.s.run({"FAKE_DEPLOY": nuevo})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("re-ejecutando", r.stdout)
+        self.assertEqual(self.s.last_good(), "A")
 
 
 if __name__ == "__main__":

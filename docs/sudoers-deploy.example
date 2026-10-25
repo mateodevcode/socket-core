@@ -1,0 +1,35 @@
+# /etc/sudoers.d/socket-core-deploy  (NO activar sin revisar; ver docs)
+# Permite al usuario "deploy" ejecutar SOLO lo que usa scripts/deploy.sh.
+# Validar:  visudo -cf docs/sudoers-deploy.example
+# Instalar: sudo install -m 0440 -o root -g root docs/sudoers-deploy.example /etc/sudoers.d/socket-core-deploy
+Cmnd_Alias SOCKETCORE_DEPLOY = \
+    /usr/bin/docker compose build *, \
+    /usr/bin/docker compose up *, \
+    /usr/bin/docker compose down *, \
+    /usr/bin/docker compose stop *, \
+    /usr/bin/docker compose ps *, \
+    /usr/bin/docker compose logs *, \
+    /usr/bin/docker exec *, \
+    /usr/bin/docker rm -f socket-core, \
+    /usr/bin/docker image prune -f, \
+    /usr/sbin/nginx -t, \
+    /usr/bin/systemctl reload nginx, \
+    /usr/bin/certbot certonly *, \
+    /usr/bin/fail2ban-client reload, \
+    /usr/bin/fail2ban-client status *, \
+    /usr/bin/cp /srv/infra/socket-core/nginx/ws.seventwo.tech.http.conf /etc/nginx/sites-available/ws.seventwo.tech.http.conf, \
+    /usr/bin/cp /srv/infra/socket-core/nginx/ws.seventwo.tech.https.conf /etc/nginx/sites-available/ws.seventwo.tech.https.conf, \
+    /usr/bin/cp /srv/infra/socket-core/nginx/conf.d/socketcore-limits.conf /etc/nginx/conf.d/socketcore-limits.conf, \
+    /usr/bin/cp /etc/nginx/sites-available/ws.seventwo.tech.http.conf /srv/infra/socket-core/backups/*, \
+    /usr/bin/cp /etc/nginx/sites-available/ws.seventwo.tech.https.conf /srv/infra/socket-core/backups/*, \
+    /usr/bin/cp /etc/nginx/conf.d/socketcore-limits.conf /srv/infra/socket-core/backups/*, \
+    /usr/bin/ln -sf /etc/nginx/sites-available/ws.seventwo.tech.http.conf /etc/nginx/sites-enabled/ws.seventwo.tech.http.conf, \
+    /usr/bin/ln -sf /etc/nginx/sites-available/ws.seventwo.tech.https.conf /etc/nginx/sites-enabled/ws.seventwo.tech.https.conf, \
+    /usr/bin/chown -R 10001\:10001 /srv/infra/socket-core/data, \
+    /usr/bin/rm -f /etc/nginx/sites-available/ws.seventwo.tech.http.conf, \
+    /usr/bin/rm -f /etc/nginx/sites-available/ws.seventwo.tech.https.conf, \
+    /usr/bin/rm -f /etc/nginx/conf.d/socketcore-limits.conf, \
+    /usr/bin/mkdir -p /var/www/html, \
+    /usr/bin/python3 /srv/infra/socket-core/scripts/sqlite_backup.py *, \
+    /usr/bin/python3 /srv/infra/socket-core/backups/sqlite_backup.py *
+deploy ALL=(root) NOPASSWD: SOCKETCORE_DEPLOY

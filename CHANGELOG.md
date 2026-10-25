@@ -477,6 +477,28 @@ sección de cada fase.
 - **R9**: `preflight.py` y `estado.py` comparan `TRUSTED_PROXIES` con el gateway de
   `central_network` y alertan de subredes anchas (/16 o mayores).
 
+
+### Fase 8.7 — Nginx, fail2ban, deploy y cadena de suministro (S1–S8)
+
+- **S1/S2**: `limit_conn_status 429`, `limit_conn ws_conn 30` (documentado el solape
+  de renovación), `/admin/` => 404, `Connection` con `map`, superficie pública
+  explícita (`/health`, `/auth/token`, `/ws`, `/channels`, `/stats`) y `/` => 404.
+  Documentada la variante "solo /ws público".
+- **S3**: `scripts/test_nginx.py` valida en contenedores (certificados de prueba y
+  upstream falso): `nginx -t`, `/admin/x` y ruta desconocida 404, `/ws` con Upgrade
+  y XFF real, y `limit_conn` => 429. Job CI `nginx`.
+- **S4**: `ignoreip` (loopback + red Docker), sample log y validación real con
+  `fail2ban-regex` (2 coincidencias 401/403; 200/429/tricky fuera). Job CI
+  `fail2ban`. Documentado el alcance a 80/443 de todos los dominios y recidive.
+- **S5**: `restart: unless-stopped` (on-failure no está probado ante reinicios del
+  daemon/VPS).
+- **S6**: el deploy re-ejecuta el script de origin si difiere; hoy CI ejecuta
+  directamente `origin/main:scripts/deploy.sh` (documentado).
+- **S7**: `docs/sudoers-deploy.example` (no aplicado) y aviso en SECURITY de que
+  push a main = ejecución en el VPS.
+- **S8**: `scripts/verify_action_shas.py` comprueba que cada SHA de action coincide
+  con la etiqueta del comentario; integrado en CI.
+
 ### Nota de estado
 
 - La suite de integración en `tests/` define el comportamiento objetivo: los

@@ -29,6 +29,19 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 PREV="$(git rev-parse HEAD)"
 log "Commit previo: $PREV"
 
+# Trae origin y, si el script de origin difiere del que se está ejecutando,
+# re-ejecuta el nuevo (protege invocaciones manuales de una versión vieja).
+git fetch origin "$BRANCH"
+NUEVO="$BACKUP_DIR/deploy-origin-$STAMP.sh"
+git show "origin/$BRANCH:scripts/deploy.sh" > "$NUEVO" \
+  || fail "no se pudo obtener scripts/deploy.sh de origin/$BRANCH"
+chmod 700 "$NUEVO"
+if [ "${DEPLOY_REEXEC:-0}" != "1" ] && ! cmp -s "$NUEVO" "${BASH_SOURCE[0]}"; then
+  log "El script de origin difiere del actual; re-ejecutando el nuevo"
+  DEPLOY_REEXEC=1 exec bash "$NUEVO"
+fi
+rm -f "$NUEVO"
+
 # ---------- R4: backup consistente de SQLite (API backup + integrity_check) ----------
 if [ -f "$DB_FILE" ]; then
   HELPER="scripts/sqlite_backup.py"
@@ -38,7 +51,7 @@ if [ -f "$DB_FILE" ]; then
       || fail "no se pudo obtener scripts/sqlite_backup.py"
   fi
   log "Backup consistente de SQLite: data-$STAMP.db"
-  python3 "$HELPER" backup --db "$DB_FILE" --out "$BACKUP_DIR/data-$STAMP.db" \
+  $SUDO python3 "$HELPER" backup --db "$DB_FILE" --out "$BACKUP_DIR/data-$STAMP.db" \
     || fail "backup de SQLite falló (integridad)"
   find "$BACKUP_DIR" -maxdepth 1 -type f -name 'data-*.db' -printf '%T@ %p
 '     | sort -rn | tail -n +11 | cut -d' ' -f2-     | while IFS= read -r viejo; do [ -n "$viejo" ] && rm -f "$viejo"; done
@@ -51,7 +64,6 @@ git reset --hard HEAD >/dev/null 2>&1 || true
 git clean -fd -e proyectos/ -e .env -e data/ -e backups/ -e .last_good_commit >/dev/null 2>&1 || true
 $SUDO chown -R 10001:10001 data 2>/dev/null || true
 log "Actualizando a origin/$BRANCH"
-git fetch origin "$BRANCH"
 git reset --hard "origin/$BRANCH"
 
 [ -f .env ] || fail "Falta .env en $ROOT (cópialo una vez, no se versiona)"
@@ -82,7 +94,7 @@ restore_db() {
 ' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)"
   if [ -n "$backup" ]; then
     log "Restaurando DB desde $(basename "$backup")"
-    python3 "$HELPER" restore --backup "$backup" --db "$DB_FILE" \
+    $SUDO python3 "$HELPER" restore --backup "$backup" --db "$DB_FILE" \
       || echo "⚠️ restore de DB falló" >&2
     $SUDO chown -R 10001:10001 data 2>/dev/null || true
   else

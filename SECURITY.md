@@ -142,3 +142,18 @@ curl -f http://127.0.0.1:3005/health
 Si encuentras un fallo de seguridad, no abras un issue público: escribe a la
 persona responsable del repositorio por un canal privado y adjunta reproducción,
 impacto y versión/commit afectado.
+
+
+## 9. Push a main = ejecución remota en el VPS
+
+Un push a `main` que pase CI ejecuta **código arbitrario en el VPS** vía SSH (deploy).
+Mitigaciones obligatorias: rama protegida con PR + revisión, `environment:
+production` con **required reviewers**, secrets `VPS_*` limitados a ese entorno,
+2FA, repo privado, commits firmados y `sudoers` restringido para el usuario de
+deploy. No permitas `pull_request_target` ni workflows que ejecuten código de forks
+con secrets.
+
+## 10. sudoers del deploy
+
+Ver `docs/sudoers-deploy.example` (no se aplica solo). Valídalo con
+`visudo -cf` y ajústalo si cambian los comandos de `scripts/deploy.sh`.
