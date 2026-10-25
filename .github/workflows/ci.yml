@@ -40,7 +40,7 @@ jobs:
 
       - name: Documentación ejecutable
         run: |
-          cargo build
+          cargo build --locked
           python3 scripts/test_docs_curl.py
 
       - name: Instalar cargo-audit
