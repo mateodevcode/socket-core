@@ -47,7 +47,8 @@ pub async fn websocket_handler(
 ) -> impl IntoResponse {
     // Gate previo: exige JWT ANTES del upgrade para no malgastar recursos.
     let claims =
-        match crate::middleware::require_jwt(&state, &headers, params.token.as_deref()).await {
+        match crate::middleware::require_jwt(&state, &headers, params.token.as_deref(), ip.0).await
+        {
             Ok(c) => c,
             Err((code, msg)) => {
                 warn!("WS rechazado: {} ({})", msg, code);

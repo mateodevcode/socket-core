@@ -401,6 +401,25 @@ sección de cada fase.
 - **S8**: jitter inicial, guía de dimensionado de `rate_limit_per_min`, y
   corrección de la prueba de migración (fue sintética; comandos reales incluidos).
 
+
+### Fase 8.2 — Endurecimiento final (M1–M9)
+
+- **M1**: sin `ConnectInfo` se responde 500 y se loguea (no se asume loopback).
+- **M2**: `rate_limit_per_min` validado en **[1, 100000]** al crear/editar keys.
+- **M3**: la auditoría de `auth_failed`/`rate_limited` incluye `ip=` (sin secretos).
+- **M4**: `TRUSTED_PROXIES` rechaza loopback y `0/0`; las IPs IPv4-mapeadas se
+  normalizan (`to_canonical`).
+- **M5**: los tests JWT incluyen control positivo (REST+WS) y exigen 401 exacto con
+  body JSON válido.
+- **M6**: CI añade jobs Node 24 (SDK) y Python (scripts); el test de `node:sqlite`
+  queda aislado (`RUN_SQLITE_TEST=1`). El deploy depende de los tres jobs.
+- **M7**: renovación con jitter aleatorio (40–120 s) y jitter inicial configurable
+  (0–5 s; 250 ms por defecto).
+- **M8**: `examples/backend` con `express` y lockfile; `smoke.mjs` hace login,
+  `/socket-token`, WS y mensaje de ida y vuelta contra un hub temporal.
+- **M9**: documentado el dimensionado real (Nginx 5 r/s `/auth/token`, 10 conexiones
+  WS/IP, `ip_rate_per_min` 600, cupo de emisión 600, y efecto de `TRUSTED_PROXIES`).
+
 ### Nota de estado
 
 - La suite de integración en `tests/` define el comportamiento objetivo: los

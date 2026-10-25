@@ -49,10 +49,48 @@ jobs:
       - name: Auditoría de dependencias
         run: cargo audit
 
+  sdk:
+    name: SDK (Node 24)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+      - name: Instalar toolchain Rust
+        uses: dtolnay/rust-toolchain@1.97.0
+      - name: Cache de Cargo
+        uses: Swatinem/rust-cache@v2.7.8
+      - name: Node 24
+        uses: actions/setup-node@v4.0.4
+        with:
+          node-version: "24"
+      - name: Compilar hub para tests
+        run: cargo build
+      - name: Tests del SDK
+        run: node --test --test-force-exit sdk/js/test/sdk.test.mjs
+      - name: SDK — test node:sqlite aislado
+        env:
+          RUN_SQLITE_TEST: "1"
+        run: node --test --test-force-exit --test-name-pattern "DB caída" sdk/js/test/sdk.test.mjs
+
+  python:
+    name: Scripts (Python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+      - name: Python 3.12
+        uses: actions/setup-python@v5.3.0
+        with:
+          python-version: "3.12"
+      - name: Tests de scripts
+        run: python -m unittest discover -s scripts -p "test_*.py" -v
+
   deploy:
     name: Despliegue al VPS
-    # needs: el deploy NO arranca si quality falla.
-    needs: [quality]
+    # needs: el deploy NO arranca si falla cualquier job.
+    needs: [quality, sdk, python]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30

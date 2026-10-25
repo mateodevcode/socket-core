@@ -56,3 +56,21 @@ fn secretos_validos_arrancan() {
         .validate_secrets()
         .is_ok());
 }
+
+#[test]
+fn trusted_proxies_no_puede_ser_loopback_ni_todo() {
+    let con = |tp: &str| {
+        let mut c = cfg(common::JWT_SECRET, common::MASTER_KEY);
+        c.trusted_proxies = tp.split(',').map(|x| x.trim().to_string()).collect();
+        c
+    };
+    for tp in ["127.0.0.1", "127.0.0.0/8", "::1", "0.0.0.0/0", "::/0"] {
+        assert!(
+            con(tp).validate_secrets().is_err(),
+            "TRUSTED_PROXIES={} debe rechazarse",
+            tp
+        );
+    }
+    assert!(con("10.0.0.0/8").validate_secrets().is_ok());
+    assert!(con("172.18.0.1").validate_secrets().is_ok());
+}

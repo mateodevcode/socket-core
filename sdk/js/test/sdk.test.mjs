@@ -14,6 +14,7 @@ import {
   _RecentIds,
   _MIN_TOKEN_INTERVAL_MS,
   tokenFromEndpoint,
+  _pickRenewBeforeMs,
 } from "../socket-core.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -542,7 +543,7 @@ test("publish durante reconexión => not_connected y luego vuelve", { timeout: 4
 
 // ---------- S2: DB caída a mitad => server_error y reconexión al volver ----------
 
-test("DB caída a mitad => server_error y reconecta cuando vuelve", { timeout: 70000 }, async () => {
+test("DB caída a mitad => server_error y reconecta cuando vuelve", { skip: process.env.RUN_SQLITE_TEST !== "1", timeout: 70000 }, async () => {
   const hub = await setupHub();
   const sdk = clientSdk(hub, "user-db");
   const statuses = [];
@@ -750,6 +751,38 @@ test("el primer connect aplica jitter (0..250 ms)", { timeout: 25000 }, async ()
     assert.ok(
       delays.length > 0 && delays[0] >= 0 && delays[0] <= 250,
       `el primer timer debe ser el jitter del connect (0..250 ms), fue ${delays[0]}`,
+    );
+  } finally {
+    globalThis.setTimeout = origSet;
+    sdk?.close();
+    await hub.cleanup();
+  }
+});
+
+// ---------- M7: jitter de renovación y del primer connect ----------
+
+test("renewBeforeMs aleatorio en [40s, 120s]", () => {
+  for (let i = 0; i < 300; i++) {
+    const v = _pickRenewBeforeMs();
+    assert.ok(v >= 40000 && v <= 120000, `fuera de rango: ${v}`);
+  }
+});
+
+test("jitter inicial configurable hasta 5s", { timeout: 25000 }, async () => {
+  const hub = await setupHub();
+  const origSet = globalThis.setTimeout;
+  const delays = [];
+  globalThis.setTimeout = (fn, ms, ...args) => {
+    delays.push(ms);
+    return origSet(fn, ms, ...args);
+  };
+  let sdk;
+  try {
+    sdk = clientSdk(hub, "user-jitter5", { initialJitterMs: 5000 });
+    await waitStatus(sdk, "connected", 15000);
+    assert.ok(
+      delays[0] >= 0 && delays[0] <= 5000,
+      `jitter inicial debe estar en [0,5000]: ${delays[0]}`,
     );
   } finally {
     globalThis.setTimeout = origSet;

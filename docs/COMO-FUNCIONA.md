@@ -378,8 +378,19 @@ imagen; si usas el hub embebido, puedes inyectar `AppState.limits` distinto.
 - Tras un reinicio del hub **todos** los clientes reconectan: hay un pico de
   `/auth/token`. El SDK añade jitter (≤250 ms en el primer connect y backoff con
   jitter en reconexiones), pero todos comparten la misma key.
-- Nginx limita `/auth/token` a **5 req/s por IP**: si muchos usuarios salen por la
-  misma IP (NAT de oficina), ese es el cuello real antes que el límite de la key.
+- Nginx limita `/auth/token` a **5 req/s por IP** con `burst=10` (zona `ws_auth`):
+  si muchos usuarios salen por la misma IP (NAT de oficina), ese es el cuello real
+  antes que el límite de la key. La zona general (`ws_general`) es 20 r/s y `/ws`
+  además limita a **10 conexiones simultáneas por IP**.
+- El hub añade su propio `ip_rate_per_min` (**600/min por IP**, todas las rutas con
+  key) y un cupo extra de emisión por IP (**600/min**). El límite de la key
+  (`rate_limit_per_min`, válido **1–100000**) es independiente y compartido.
+- **TRUSTED_PROXIES mal puesta**: si está vacía, se ignora `X-Forwarded-For` y el
+  hub ve la IP del gateway: todos los clientes comparten los 600/min de esa IP
+  (puede limitar de más) y no se puede banear por IP real. Si confías en un proxy
+  que no lo es, un cliente puede **falsificar XFF** y repartir/evadir cupos. Por
+  eso el arranque **rechaza** loopback y `0.0.0.0/0`/`::/0` en `TRUSTED_PROXIES`;
+  configura solo el gateway de `central_network` (o la IP del contenedor Nginx).
 - Regla práctica (aproximada): `rate_limit_per_min >= conexiones_esperadas ×
   (1 + 60/TTL_seg) + llamadas_REST/min`, con margen. Ejemplo: 500 conexiones y TTL
   600 ⇒ ~500 iniciales + ~55 renovaciones/min ≈ 555/min; pon 1000–1500 y ajústalo

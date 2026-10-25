@@ -13,3 +13,4 @@ __pycache__/
 *.pyc
 backups/
 .last_deploy_commit
+node_modules/

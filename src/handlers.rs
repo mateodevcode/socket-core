@@ -229,7 +229,7 @@ pub async fn emit_event(
             Err(e) => return authz_err(e),
         }
     } else {
-        let claims = match require_jwt(&state, &headers, None).await {
+        let claims = match require_jwt(&state, &headers, None, ip.0).await {
             Ok(c) => c,
             Err(v) => return err(v.0, v.1),
         };
@@ -388,6 +388,12 @@ pub async fn admin_create_key(
     if req.name.trim().is_empty() {
         return err(StatusCode::BAD_REQUEST, "name requerido");
     }
+    if !(1..=100_000).contains(&req.rate_limit_per_min) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "rate_limit_per_min debe estar entre 1 y 100000",
+        );
+    }
     // Los prefijos no pueden solaparse entre proyectos (incluido "*").
     let prefix = if req.channel_prefix.trim().is_empty() {
         "*".to_string()
@@ -484,6 +490,14 @@ pub async fn admin_update_key(
 ) -> impl IntoResponse {
     if let Err((c, m)) = require_master(&state, &headers, ip.0) {
         return err(c, m);
+    }
+    if let Some(r) = req.rate_limit_per_min {
+        if !(1..=100_000).contains(&r) {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "rate_limit_per_min debe estar entre 1 y 100000",
+            );
+        }
     }
     if let Some(prefix) = req.channel_prefix.as_deref() {
         let normalized = if prefix.trim().is_empty() {

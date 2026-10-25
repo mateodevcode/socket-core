@@ -67,6 +67,30 @@ fn sign_with_real_claims(hub: &Hub, sub: &str, iss: &str, aud: &str, exp: i64) -
 
 /// Comprueba que un token no entra ni por REST (emit) ni por WS (upgrade).
 async fn assert_rechazado(hub: &Hub, channel: &str, token: &str) {
+    // Control positivo: el MISMO helper con un JWT válido debe funcionar (REST+WS),
+    // para demostrar que el test no pasa por un fallo general del hub.
+    let (valido, _) = hub.signed_claims("control-positivo", channel, "both");
+    let ok = hub
+        .emit_with_bearer(
+            &valido,
+            channel,
+            vec!["*".into()],
+            json!({"type": "chat", "text": "ok"}),
+        )
+        .await;
+    assert_eq!(ok.status(), 200, "control positivo REST debe poder emitir");
+    let mut ws_ok = hub
+        .ws_connect_raw(&valido)
+        .await
+        .expect("control positivo WS debe conectar");
+    {
+        use futures_util::SinkExt;
+        let _ = ws_ok
+            .send(tokio_tungstenite::tungstenite::Message::Close(None))
+            .await;
+    }
+
+    // Token bajo prueba: exactamente 401 y body JSON válido.
     let res = hub
         .emit_with_bearer(
             token,
@@ -75,7 +99,20 @@ async fn assert_rechazado(hub: &Hub, channel: &str, token: &str) {
             json!({"type": "chat", "text": "no"}),
         )
         .await;
-    assert_eq!(res.status(), 401, "REST debía rechazar el token");
+    assert_eq!(
+        res.status(),
+        401,
+        "REST debía rechazar el token (exactamente 401)"
+    );
+    let body: Value = res
+        .json()
+        .await
+        .expect("el body del 401 debe ser JSON válido");
+    assert!(
+        body.get("success").is_some(),
+        "respuesta de error inesperada: {:?}",
+        body
+    );
     let ws = hub.ws_connect_raw(token).await;
     assert!(ws.is_err(), "WS debía rechazar el upgrade");
 }

@@ -20,8 +20,14 @@ const DEFAULT_RENEW_BEFORE_MS = 60_000;
 const MIN_BACKOFF_MS = 500;
 const MAX_BACKOFF_MS = 30_000;
 const RATE_LIMITED_MIN_WAIT_MS = 10_000;
-/** Jitter máximo del PRIMER connect (evita avalancha al recargar muchos clientes). */
+/** Jitter por defecto del PRIMER connect (configurable hasta 5000 ms). */
 export const _INITIAL_JITTER_MAX_MS = 250;
+export const _INITIAL_JITTER_MAX_ALLOWED_MS = 5000;
+
+/** Margen aleatorio antes de expirar para renovar (40–120 s). */
+export function _pickRenewBeforeMs() {
+  return 40_000 + Math.random() * 80_000;
+}
 
 const FATAL_CODES = new Set([
   "forbidden",
@@ -392,7 +398,7 @@ export function connect(options = {}) {
     if (state.closed || state.fatal) return;
     if (state.renewTimer) clearTimeout(state.renewTimer);
     const ttlMs = Math.max(1000, Number(sock.tokenInfo.expires_in || 600) * 1000);
-    const before = Math.max(0, options.renewBeforeMs ?? DEFAULT_RENEW_BEFORE_MS);
+    const before = Math.max(0, options.renewBeforeMs ?? _pickRenewBeforeMs());
     const delay = Math.max(0, ttlMs - before);
     state.renewTimer = setTimeout(() => renew(sock), delay);
   }
@@ -489,7 +495,11 @@ export function connect(options = {}) {
 
   setStatus("connecting");
   // Jitter inicial: muchos clientes abriendo a la vez no piden token en el mismo ms.
-  setTimeout(connectOnce, Math.random() * _INITIAL_JITTER_MAX_MS);
+  const jitterMax = Math.max(
+    0,
+    Math.min(_INITIAL_JITTER_MAX_ALLOWED_MS, options.initialJitterMs ?? _INITIAL_JITTER_MAX_MS),
+  );
+  setTimeout(connectOnce, Math.random() * jitterMax);
   return api;
 }
 

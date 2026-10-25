@@ -6,7 +6,7 @@ use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
 use dashmap::DashMap;
 use ipnet::IpNet;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
@@ -61,19 +61,20 @@ pub struct ClientIp(pub IpAddr);
 
 #[axum::async_trait]
 impl FromRequestParts<AppState> for ClientIp {
-    type Rejection = std::convert::Infallible;
+    type Rejection = StatusCode;
 
     async fn from_request_parts(
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let peer = parts
-            .extensions
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|c| c.0.ip())
-            .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let Some(conn) = parts.extensions.get::<ConnectInfo<SocketAddr>>() else {
+            tracing::error!(
+                "petición sin ConnectInfo: el servidor no se está sirviendo con into_make_service_with_connect_info"
+            );
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        };
         Ok(ClientIp(resolve_client_ip(
-            peer,
+            conn.0.ip(),
             &parts.headers,
             &state.trusted_proxies,
         )))
@@ -83,6 +84,8 @@ impl FromRequestParts<AppState> for ClientIp {
 /// Solo si el par (IP del socket) es un proxy de confianza se leen XFF/X-Real-IP.
 /// De XFF se usa el ÚLTIMO valor (el añadido por el proxy de confianza), nunca el primero.
 pub fn resolve_client_ip(peer: IpAddr, headers: &HeaderMap, trusted: &[IpNet]) -> IpAddr {
+    // Normaliza ::ffff:a.b.c.d a IPv4 para comparar y agrupar correctamente.
+    let peer = peer.to_canonical();
     let trusted_peer = trusted.iter().any(|net| net.contains(&peer));
     if !trusted_peer {
         return peer;
@@ -90,7 +93,7 @@ pub fn resolve_client_ip(peer: IpAddr, headers: &HeaderMap, trusted: &[IpNet]) -
     if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
         if let Some(last) = xff.split(',').map(|s| s.trim()).rfind(|s| !s.is_empty()) {
             if let Ok(ip) = last.parse::<IpAddr>() {
-                return ip;
+                return ip.to_canonical();
             }
         }
     }
@@ -99,7 +102,7 @@ pub fn resolve_client_ip(peer: IpAddr, headers: &HeaderMap, trusted: &[IpNet]) -
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.trim().parse::<IpAddr>().ok())
     {
-        return ip;
+        return ip.to_canonical();
     }
     peer
 }
@@ -221,7 +224,9 @@ pub async fn require_api_key(
         .limiter
         .check(&ip_bucket, state.limits.ip_rate_per_min)
     {
-        state.audit.record(None, "rate_limited", "ip");
+        state
+            .audit
+            .record(None, "rate_limited", &format!("ip={} motivo=ip", ip));
         return Err((StatusCode::TOO_MANY_REQUESTS, "rate limit por IP".into()));
     }
 
@@ -232,13 +237,21 @@ pub async fn require_api_key(
         .unwrap_or("")
         .trim();
     if raw.is_empty() {
-        state.audit.record(None, "auth_failed", "falta_api_key");
+        state.audit.record(
+            None,
+            "auth_failed",
+            &format!("ip={} motivo=falta_api_key", ip),
+        );
         return Err((StatusCode::UNAUTHORIZED, "falta X-Api-Key".into()));
     }
     let key = match state.keys.validate(raw).await {
         Ok(Some(k)) => k,
         Ok(None) => {
-            state.audit.record(None, "auth_failed", "api_key_invalida");
+            state.audit.record(
+                None,
+                "auth_failed",
+                &format!("ip={} motivo=api_key_invalida", ip),
+            );
             return Err((
                 StatusCode::UNAUTHORIZED,
                 "api key inválida, revocada o expirada".into(),
@@ -256,18 +269,22 @@ pub async fn require_api_key(
     // 3) Origen (domains) y scope.
     let origin = request_origin(headers);
     if !origin_allowed(&key, origin.as_deref()) {
-        state
-            .audit
-            .record(Some(&key.id), "auth_failed", "origen_no_permitido");
+        state.audit.record(
+            Some(&key.id),
+            "auth_failed",
+            &format!("ip={} motivo=origen_no_permitido", ip),
+        );
         return Err((
             StatusCode::FORBIDDEN,
             "origen no permitido para esta key".into(),
         ));
     }
     if !required_scope.is_empty() && !has_scope(&key, required_scope) {
-        state
-            .audit
-            .record(Some(&key.id), "auth_failed", "scope_insuficiente");
+        state.audit.record(
+            Some(&key.id),
+            "auth_failed",
+            &format!("ip={} motivo=scope_insuficiente", ip),
+        );
         return Err((
             StatusCode::FORBIDDEN,
             format!("scope '{}' no permitido", required_scope),
@@ -277,7 +294,11 @@ pub async fn require_api_key(
     // 4) Límite por key.
     let bucket = format!("key:{}", key.id);
     if !state.limiter.check(&bucket, key.rate_limit_per_min) {
-        state.audit.record(Some(&key.id), "rate_limited", "key");
+        state.audit.record(
+            Some(&key.id),
+            "rate_limited",
+            &format!("ip={} motivo=key", ip),
+        );
         return Err((StatusCode::TOO_MANY_REQUESTS, "rate limit excedido".into()));
     }
     Ok(key)
@@ -289,14 +310,17 @@ pub async fn require_jwt(
     state: &AppState,
     headers: &HeaderMap,
     query_token: Option<&str>,
+    ip: IpAddr,
 ) -> Result<Claims, (StatusCode, String)> {
     let token = bearer_from_header(headers, query_token)
         .ok_or((StatusCode::UNAUTHORIZED, "falta token Bearer".into()))?;
 
     if token.starts_with(KEY_PREFIX) {
-        state
-            .audit
-            .record(None, "auth_failed", "api_key_como_token");
+        state.audit.record(
+            None,
+            "auth_failed",
+            &format!("ip={} motivo=api_key_como_token", ip),
+        );
         return Err((
             StatusCode::UNAUTHORIZED,
             "api keys no son tokens: usa X-Api-Key en REST o pide un JWT en /auth/token".into(),
@@ -306,16 +330,22 @@ pub async fn require_jwt(
     let claims = match decode_jwt(&state.jwt_secret, &token) {
         Ok(c) => c,
         Err(_) => {
-            state.audit.record(None, "auth_failed", "jwt_invalido");
+            state.audit.record(
+                None,
+                "auth_failed",
+                &format!("ip={} motivo=jwt_invalido", ip),
+            );
             return Err((StatusCode::UNAUTHORIZED, "jwt inválido o expirado".into()));
         }
     };
     // FAIL-CLOSED: si no se puede comprobar la revocación, se deniega (500) y se loguea.
     match state.keys.is_token_revoked(&claims.jti).await {
         Ok(true) => {
-            state
-                .audit
-                .record(Some(&claims.project_id), "auth_failed", "jwt_revocado");
+            state.audit.record(
+                Some(&claims.project_id),
+                "auth_failed",
+                &format!("ip={} motivo=jwt_revocado", ip),
+            );
             return Err((StatusCode::UNAUTHORIZED, "token revocado".into()));
         }
         Ok(false) => {}
@@ -328,4 +358,32 @@ pub async fn require_jwt(
         }
     }
     Ok(claims)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn normaliza_ipv4_mapeada_en_ipv6() {
+        let peer: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        let trusted: Vec<IpNet> = vec!["127.0.0.1/32".parse().unwrap()];
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("::ffff:10.1.2.3"),
+        );
+        assert_eq!(
+            resolve_client_ip(peer, &headers, &trusted),
+            "10.1.2.3".parse::<IpAddr>().unwrap(),
+            "XFF mapeado debe normalizarse y confiar en el peer canónico"
+        );
+        // Sin proxy de confianza, se devuelve el peer (también canónico).
+        let sin: Vec<IpNet> = vec![];
+        assert_eq!(
+            resolve_client_ip(peer, &headers, &sin),
+            "127.0.0.1".parse::<IpAddr>().unwrap()
+        );
+    }
 }

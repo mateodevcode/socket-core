@@ -55,8 +55,8 @@ GitHub) y los pasos manuales de seguridad que debes completar una vez.
   reconstruir (retención 10). Cópialos también fuera del servidor.
 - `ADMIN_PORT` no se publica; el acceso es solo por `docker exec` (ver §4).
 - `TRUSTED_PROXIES` debe contener el **gateway de `central_network`** (o la IP del
-  contenedor de Nginx si está en esa red), NO `127.0.0.1` salvo que compartan
-  namespace. Averígualo en §5.
+  contenedor de Nginx si está en esa red). El arranque **rechaza loopback**
+  (`127.0.0.0/8`, `::1`) y `0.0.0.0/0`/`::/0`. Averígualo en §5.
 - Nginx sobrescribe `X-Forwarded-For` con `$remote_addr`; no lo cambies a
   `$proxy_add_x_forwarded_for`.
 

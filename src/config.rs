@@ -1,6 +1,6 @@
 use ipnet::IpNet;
 use std::env;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
 pub const DEFAULT_JWT_SECRET: &str = "dev-change-me-please-rotate";
@@ -110,6 +110,20 @@ impl AppConfig {
         }
         if !(60..=3600).contains(&self.jwt_ttl_secs) {
             return Err("JWT_TTL_SECS debe estar entre 60 y 3600".into());
+        }
+        for p in &self.trusted_proxies {
+            let net =
+                parse_ip_or_cidr(p).ok_or_else(|| format!("TRUSTED_PROXIES inválido: {}", p))?;
+            if net.prefix_len() == 0
+                || net.addr().is_loopback()
+                || net.contains(&IpAddr::V4(Ipv4Addr::LOCALHOST))
+                || net.contains(&IpAddr::V6(Ipv6Addr::LOCALHOST))
+            {
+                return Err(
+                    "TRUSTED_PROXIES no puede incluir loopback ni 0.0.0.0/0 (confiarías en cabeceras de cualquiera)"
+                        .into(),
+                );
+            }
         }
         Ok(())
     }
