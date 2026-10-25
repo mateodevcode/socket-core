@@ -513,3 +513,10 @@ Ejemplo completo ejecutable: `examples/README.md` (backend Express + chat).
   borra o se edita (el solape incluye keys revocadas). El error del servidor nombra
   la key que ocupa el prefijo (sin secretos); bórrala o cámbiale el prefijo para
   liberarlo.
+- **Borrar una key borra sus canales** en cascada (memoria + SQLite) y cierra sus
+  WebSockets. Eso libera tanto el prefijo como los nombres de canal para reutilizarlos.
+  La auditoría registra `key_delete` con `canales=N`.
+- **Renombrar una key cambia el `source` de los mensajes NUEVOS**: el `source` del WS
+  es `proyecto:sub` tomado del claim del JWT. Los JWT ya emitidos conservan el nombre
+  viejo hasta que el cliente renueve/reconecte (el SDK renueva ~1–2 min antes de
+  expirar). En REST, `source` lo elige el backend y no cambia por renombrar la key.

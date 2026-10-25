@@ -100,6 +100,11 @@ Después, en el deploy real (con backup hecho): aplica el UPDATE sobre
 arranca. Un canal huérfano (`project_id=''`) hoy es **invisible para todos**
 (responde 404) hasta asignarle dueño.
 
+> **Tests de red:** `admin_no_escucha_en_otra_interfaz` requiere una interfaz
+> no-loopback. Si el entorno no la tiene, el test **falla** para no dar falsos
+> positivos; define `SKIP_NET_IFACE_TEST=1` para omitirlo explícitamente (p. ej. CI
+> sin red externa).
+
 > Si no tienes `sqlite3` en el host, puedes consultar la copia con python3:
 > `python3 -c "import sqlite3;c=sqlite3.connect('/tmp/migcheck/hub.db');print(c.execute(\"SELECT COUNT(*) FROM channels WHERE project_id=''\").fetchone()[0])"`
 > o revisar los logs del arranque: la migración informa

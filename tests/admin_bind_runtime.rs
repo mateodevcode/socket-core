@@ -17,8 +17,13 @@ async fn admin_no_escucha_en_otra_interfaz() {
     let _ = probe.connect("192.0.2.1:80");
     let ip = probe.local_addr().unwrap().ip();
     if ip.is_loopback() {
-        eprintln!("sin interfaz no-loopback en este entorno: comprobación omitida");
-        return;
+        if std::env::var("SKIP_NET_IFACE_TEST").as_deref() == Ok("1") {
+            eprintln!("SKIP_NET_IFACE_TEST=1: sin interfaz no-loopback, omitido a petición");
+            return;
+        }
+        panic!(
+            "este entorno no tiene interfaz no-loopback; no se puede verificar el binding del admin.              Define SKIP_NET_IFACE_TEST=1 para omitir explícitamente."
+        );
     }
 
     let res = tokio::net::TcpStream::connect((ip, port)).await;

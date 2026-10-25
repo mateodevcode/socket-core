@@ -213,13 +213,19 @@ impl KeyStore {
                 return Err("rate_limit_per_min inválido".into());
             }
         }
-        let expires_at = expires_in_days.map(|d| {
-            if d <= 0 {
-                None
-            } else {
-                Some(chrono::Utc::now().timestamp() + d * 86400)
+        let expires_at = match expires_in_days {
+            Some(d) if d <= 0 => Some(None),
+            Some(d) => {
+                let secs = d
+                    .checked_mul(86400)
+                    .and_then(|v| chrono::Utc::now().timestamp().checked_add(v));
+                match secs {
+                    Some(v) => Some(Some(v)),
+                    None => return Err("expires_in_days inválido".into()),
+                }
             }
-        });
+            None => None,
+        };
         // Si cambian prefijo o scopes, las conexiones abiertas deben reevaluarse:
         // se cierran (los clientes reconectan con credenciales vigentes).
         let security_changed = channel_prefix.is_some() || scopes.is_some();
@@ -283,8 +289,13 @@ impl KeyStore {
         .execute(&self.pool)
         .await
         .map_err(|e| {
-            tracing::error!("create key: error de DB: {}", e);
-            "internal error".to_string()
+            let msg = e.to_string();
+            if msg.contains("api_keys.name") {
+                "name ya existe".to_string()
+            } else {
+                tracing::error!("update key: error de DB: {}", e);
+                "internal error".to_string()
+            }
         })?;
         if res.rows_affected() == 0 {
             return Err("key no encontrada".into());
@@ -398,6 +409,153 @@ impl KeyStore {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.is_some())
+    }
+
+    /// Alta ATÓMICA: comprueba solape de prefijo y nombre DENTRO de una transacción
+    /// con BEGIN IMMEDIATE (lock de escritura), e inserta. Evita carreras.
+    /// Errores: "name ya existe", "prefix_conflict:<nombre>", "internal error".
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_checked(
+        &self,
+        name: String,
+        domains: Vec<String>,
+        channel_prefix: String,
+        scopes: Vec<String>,
+        rate_limit_per_min: i64,
+        expires_at: Option<i64>,
+    ) -> Result<(ApiKey, String), String> {
+        let raw = generate_raw_key();
+        let hash = hash_key(&raw);
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().timestamp();
+        let domains_s = if domains.is_empty() {
+            "*".to_string()
+        } else {
+            domains.join(",")
+        };
+        let scopes_s = if scopes.is_empty() {
+            "publish,subscribe".to_string()
+        } else {
+            scopes.join(",")
+        };
+        let prefix_s = if channel_prefix.trim().is_empty() {
+            "*".to_string()
+        } else {
+            channel_prefix
+        };
+
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|_| "internal error".to_string())?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *conn)
+            .await
+            .map_err(|_| "internal error".to_string())?;
+
+        let resultado: Result<(), String> = async {
+            let existe: Option<(String,)> =
+                sqlx::query_as("SELECT id FROM api_keys WHERE name = ?")
+                    .bind(&name)
+                    .fetch_optional(&mut *conn)
+                    .await
+                    .map_err(|_| "internal error".to_string())?;
+            if existe.is_some() {
+                return Err("name ya existe".to_string());
+            }
+            let rows = sqlx::query_as::<_, (String, String, String)>(
+                "SELECT id, name, channel_prefix FROM api_keys",
+            )
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(|_| "internal error".to_string())?;
+            let wanted = prefix_bases(&prefix_s);
+            for (_kid, kname, existing) in rows {
+                for b in prefix_bases(&existing) {
+                    for w in &wanted {
+                        if bases_overlap(w, &b) {
+                            return Err(format!("prefix_conflict:{}", kname));
+                        }
+                    }
+                }
+            }
+            sqlx::query(
+                "INSERT INTO api_keys (id,name,key_hash,domains,channel_prefix,scopes,rate_limit_per_min,expires_at,revoked,created_at)
+                 VALUES (?,?,?,?,?,?,?,?,0,?)",
+            )
+            .bind(&id)
+            .bind(&name)
+            .bind(&hash)
+            .bind(&domains_s)
+            .bind(&prefix_s)
+            .bind(&scopes_s)
+            .bind(rate_limit_per_min)
+            .bind(expires_at)
+            .bind(now)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| {
+                if e.to_string().contains("api_keys.name") {
+                    "name ya existe".to_string()
+                } else {
+                    tracing::error!("create key: error de DB: {}", e);
+                    "internal error".to_string()
+                }
+            })?;
+            Ok(())
+        }
+        .await;
+
+        match resultado {
+            Ok(()) => {
+                sqlx::query("COMMIT")
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(|_| "internal error".to_string())?;
+                let key = ApiKey {
+                    id,
+                    name,
+                    domains: split_csv(&domains_s),
+                    channel_prefixes: split_csv(&prefix_s),
+                    scopes: split_csv(&scopes_s),
+                    rate_limit_per_min,
+                    expires_at,
+                    revoked: false,
+                    created_at: now,
+                };
+                Ok((key, raw))
+            }
+            Err(e) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                Err(e)
+            }
+        }
+    }
+
+    /// Borra una key y TODOS sus canales en una transacción. Devuelve el número
+    /// de canales borrados (o None si la key no existía). Cierra WS por proyecto.
+    pub async fn delete_cascade(&self, id: &str) -> Result<Option<usize>, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        let borrada = sqlx::query("DELETE FROM api_keys WHERE id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            > 0;
+        if !borrada {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        let canales = sqlx::query("DELETE FROM channels WHERE project_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected() as usize;
+        tx.commit().await?;
+        self.control
+            .send(ControlEvent::CloseProject(id.to_string()));
+        Ok(Some(canales))
     }
 
     /// Revoca un jti y cierra las conexiones WS que lo usan.
@@ -516,9 +674,8 @@ pub fn channel_allowed(key: &ApiKey, channel: &str) -> bool {
 }
 
 pub fn has_scope(key: &ApiKey, scope: &str) -> bool {
-    key.scopes
-        .iter()
-        .any(|s| s == scope || s == "admin" || s == "*")
+    // Exacto: los comodines "*"/"admin" ya NO conceden scopes.
+    key.scopes.iter().any(|s| s == scope)
 }
 
 #[cfg(test)]
@@ -560,6 +717,23 @@ mod tests {
         assert!(channel_allowed(&k("*", "*", "*"), "cualquiera"));
         assert!(!has_scope(&key, "manage"));
         assert!(has_scope(&key, "publish"));
+    }
+
+    #[test]
+    fn has_scope_no_acepta_comodines() {
+        let estrellas = k("*", "*", "*");
+        assert!(
+            !has_scope(&estrellas, "publish"),
+            "'*' ya no es comodín de scope"
+        );
+        let admin = k("*", "*", "admin");
+        assert!(
+            !has_scope(&admin, "manage"),
+            "'admin' ya no es comodín de scope"
+        );
+        let normal = k("*", "*", "publish,subscribe");
+        assert!(has_scope(&normal, "publish"));
+        assert!(!has_scope(&normal, "manage"));
     }
 
     #[test]

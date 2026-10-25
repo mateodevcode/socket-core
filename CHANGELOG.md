@@ -420,6 +420,25 @@ sección de cada fase.
 - **M9**: documentado el dimensionado real (Nginx 5 r/s `/auth/token`, 10 conexiones
   WS/IP, `ip_rate_per_min` 600, cupo de emisión 600, y efecto de `TRUSTED_PROXIES`).
 
+
+### Fase 8.4 — Administración de keys endurecida (P1–P8)
+
+- **P1**: borrar una key borra en cascada sus canales (memoria + SQLite), cierra sus
+  WS y audita `canales=N`; el prefijo y los nombres quedan libres.
+- **P2**: nombre de key duplicado → **409** (sin detalles de DB) en alta y edición.
+- **P3**: `expires_in_days` en alta `1..=3650`; en edición `0` (quitar) o `1..=3650`;
+  negativos/desmesurados → 400; cálculo con `checked_mul`.
+- **P4**: scopes solo `publish|subscribe|manage` (sin duplicados; `has_scope` ya no
+  acepta `*`/`admin`); prefijos validados con el charset/longitud de canales;
+  domains solo `*`, `*.dominio` o URL http(s).
+- **P5**: corregido el log de `update()` ("update key").
+- **P6**: alta atómica con `BEGIN IMMEDIATE` (nombre + solape + INSERT): dos altas
+  concurrentes con el mismo prefijo, solo una gana.
+- **P7**: el test de binding admin falla si no hay interfaz no-loopback salvo
+  `SKIP_NET_IFACE_TEST=1` (documentado).
+- **P8**: documentado el borrado en cascada, la liberación del prefijo y el efecto de
+  renombrar una key en el `source` de los mensajes nuevos.
+
 ### Nota de estado
 
 - La suite de integración en `tests/` define el comportamiento objetivo: los

@@ -394,34 +394,42 @@ pub async fn admin_create_key(
             "rate_limit_per_min debe estar entre 1 y 100000",
         );
     }
-    // Los prefijos no pueden solaparse entre proyectos (incluido "*").
+    if let Some(d) = req.expires_in_days {
+        if !(1..=crate::models::MAX_EXPIRES_DAYS).contains(&d) {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "expires_in_days debe estar entre 1 y 3650",
+            );
+        }
+    }
+    if let Err(e) = crate::models::validate_scopes(&req.scopes) {
+        return err(StatusCode::BAD_REQUEST, e);
+    }
+    if let Err(e) = crate::models::validate_domains(&req.domains) {
+        return err(StatusCode::BAD_REQUEST, e);
+    }
     let prefix = if req.channel_prefix.trim().is_empty() {
         "*".to_string()
     } else {
         req.channel_prefix.trim().to_string()
     };
-    match state.keys.prefix_conflicts(&prefix, None).await {
-        Ok(Some(otra)) => {
-            return err(
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "channel_prefix solapa con el proyecto '{}' (incluye keys revocadas; bórrala o cámbiale el prefijo para liberarlo)",
-                    otra
-                ),
-            )
-        }
-        Ok(None) => {}
-        Err(e) => {
-            tracing::error!("admin_create_key: {}", e);
-            return err(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
-        }
+    if let Err(e) = crate::models::validate_channel_prefix(&prefix) {
+        return err(StatusCode::BAD_REQUEST, e);
     }
-    let expires_at = req
-        .expires_in_days
-        .map(|d| chrono::Utc::now().timestamp() + d * 86400);
+    let expires_at = match req.expires_in_days {
+        Some(d) => match d
+            .checked_mul(86400)
+            .and_then(|v| chrono::Utc::now().timestamp().checked_add(v))
+        {
+            Some(v) => Some(v),
+            None => return err(StatusCode::BAD_REQUEST, "expires_in_days inválido"),
+        },
+        None => None,
+    };
+    // Alta atómica (nombre + solape de prefijo + INSERT en una transacción).
     match state
         .keys
-        .create(
+        .create_checked(
             req.name,
             req.domains,
             prefix,
@@ -448,14 +456,19 @@ pub async fn admin_create_key(
             )
                 .into_response()
         }
-        Err(e) => {
-            let code = if e == "internal error" {
-                StatusCode::INTERNAL_SERVER_ERROR
-            } else {
-                StatusCode::BAD_REQUEST
-            };
-            err(code, e)
+        Err(e) if e == "name ya existe" => err(StatusCode::CONFLICT, e),
+        Err(e) if e.starts_with("prefix_conflict:") => {
+            let otra = e.trim_start_matches("prefix_conflict:");
+            err(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "channel_prefix solapa con el proyecto '{}' (incluye keys revocadas; bórrala o cámbiale el prefijo para liberarlo)",
+                    otra
+                ),
+            )
         }
+        Err(e) if e == "internal error" => err(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+        Err(e) => err(StatusCode::BAD_REQUEST, e),
     }
 }
 
@@ -499,12 +512,33 @@ pub async fn admin_update_key(
             );
         }
     }
+    if let Some(d) = req.expires_in_days {
+        if d != 0 && !(1..=crate::models::MAX_EXPIRES_DAYS).contains(&d) {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "expires_in_days debe ser 0 (sin expiración) o 1..=3650",
+            );
+        }
+    }
+    if let Some(scopes) = req.scopes.as_ref() {
+        if let Err(e) = crate::models::validate_scopes(scopes) {
+            return err(StatusCode::BAD_REQUEST, e);
+        }
+    }
+    if let Some(domains) = req.domains.as_ref() {
+        if let Err(e) = crate::models::validate_domains(domains) {
+            return err(StatusCode::BAD_REQUEST, e);
+        }
+    }
     if let Some(prefix) = req.channel_prefix.as_deref() {
         let normalized = if prefix.trim().is_empty() {
             "*".to_string()
         } else {
             prefix.trim().to_string()
         };
+        if let Err(e) = crate::models::validate_channel_prefix(&normalized) {
+            return err(StatusCode::BAD_REQUEST, e);
+        }
         match state.keys.prefix_conflicts(&normalized, Some(&id)).await {
             Ok(Some(otra)) => {
                 return err(
@@ -553,6 +587,7 @@ pub async fn admin_update_key(
         Err(e) => {
             let code = match e.as_str() {
                 "key no encontrada" => StatusCode::NOT_FOUND,
+                "name ya existe" => StatusCode::CONFLICT,
                 "internal error" => StatusCode::INTERNAL_SERVER_ERROR,
                 _ => StatusCode::BAD_REQUEST,
             };
@@ -570,12 +605,25 @@ pub async fn admin_delete_key(
     if let Err((c, m)) = require_master(&state, &headers, ip.0) {
         return err(c, m);
     }
-    match state.keys.delete(&id).await {
-        Ok(true) => {
-            state.audit.record(Some(&id), "key_delete", "ok");
-            Json(ApiResponse::ok(json!({"deleted": true}))).into_response()
+    let canales = state.channel_manager.list_channels_for(&id);
+    match state.keys.delete_cascade(&id).await {
+        Ok(Some(n)) => {
+            // Cierra explícitamente cada canal y lo quita de memoria.
+            for ch in &canales {
+                state
+                    .control
+                    .send(ControlEvent::CloseChannel(ch.id.clone()));
+                state.channel_manager.remove_channel(&ch.id);
+            }
+            state
+                .audit
+                .record(Some(&id), "key_delete", &format!("canales={}", n));
+            Json(ApiResponse::ok(
+                json!({"deleted": true, "channels_deleted": n}),
+            ))
+            .into_response()
         }
-        Ok(false) => err(StatusCode::NOT_FOUND, "key no encontrada"),
+        Ok(None) => err(StatusCode::NOT_FOUND, "key no encontrada"),
         Err(e) => {
             tracing::error!("admin_delete_key: {}", e);
             err(StatusCode::INTERNAL_SERVER_ERROR, "internal error")

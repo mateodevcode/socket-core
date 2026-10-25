@@ -107,6 +107,79 @@ pub fn validate_outbound(
     Ok(())
 }
 
+pub const ALLOWED_SCOPES: [&str; 3] = ["publish", "subscribe", "manage"];
+pub const MAX_EXPIRES_DAYS: i64 = 3650;
+
+/// Scopes permitidos, sin duplicados. (Los comodines "*"/"admin" ya no existen.)
+pub fn validate_scopes(scopes: &[String]) -> Result<(), String> {
+    let mut vistos = std::collections::HashSet::new();
+    for s in scopes {
+        if !ALLOWED_SCOPES.contains(&s.as_str()) {
+            return Err(format!(
+                "scope no permitido: '{}' (usa publish, subscribe, manage)",
+                s
+            ));
+        }
+        if !vistos.insert(s.clone()) {
+            return Err(format!("scope duplicado: '{}'", s));
+        }
+    }
+    Ok(())
+}
+
+fn host_valido(h: &str) -> bool {
+    !h.is_empty()
+        && h.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '_'))
+}
+
+/// domains: "*", "*.dominio" o URL con esquema http/https.
+pub fn validate_domains(domains: &[String]) -> Result<(), String> {
+    for d in domains {
+        if d == "*" {
+            continue;
+        }
+        if let Some(rest) = d.strip_prefix("*.") {
+            if !host_valido(rest) {
+                return Err(format!("dominio inválido: '{}'", d));
+            }
+            continue;
+        }
+        if let Some(rest) = d
+            .strip_prefix("https://")
+            .or_else(|| d.strip_prefix("http://"))
+        {
+            let host = rest.split('/').next().unwrap_or("");
+            if !host_valido(host) {
+                return Err(format!("dominio inválido: '{}'", d));
+            }
+            continue;
+        }
+        return Err(format!(
+            "dominio inválido: '{}' (usa '*', '*.dominio' o http(s)://host)",
+            d
+        ));
+    }
+    Ok(())
+}
+
+/// Prefijos: "*", "nombre:*" o nombre exacto, con el charset/longitud de canales.
+pub fn validate_channel_prefix(prefix_s: &str) -> Result<(), String> {
+    for p in prefix_s
+        .split(',')
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+    {
+        if p == "*" {
+            continue;
+        }
+        let base = p.strip_suffix(":*").unwrap_or(p);
+        validate_channel_name(base)
+            .map_err(|e| format!("channel_prefix inválido '{}': {}", p, e))?;
+    }
+    Ok(())
+}
+
 pub const MAX_ID_LEN: usize = 128;
 pub const MAX_CHANNEL_NAME_LEN: usize = 128;
 pub const MAX_DESCRIPTION_LEN: usize = 500;
