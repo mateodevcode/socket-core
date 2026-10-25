@@ -312,3 +312,52 @@ Además, `deploy.sh` compara el script de origin con el que se está ejecutando 
 difieren, se **re-ejecuta** desde la versión nueva (protege ejecuciones manuales de
 una copia vieja). El commit sano se guarda en `.last_good_commit` **solo** tras
 salud + chequeo público.
+
+
+## 8. Programar estado.py (cron/systemd) sin filtrar MASTER_KEY
+
+`estado.py` solo acepta `SOCKET_MASTER_KEY` (env) o `--master-key`; ya **no** lee
+ficheros `.master_key` del repo. Para cron/systemd usa un EnvironmentFile de root
+con permisos 0600:
+
+```bash
+sudo install -d -m 0700 /etc/socket-core
+sudo sh -c 'umask 077; printf "SOCKET_MASTER_KEY=%s
+" "<MASTER_KEY>" > /etc/socket-core/estado.env'
+sudo chown root:root /etc/socket-core/estado.env
+sudo chmod 600 /etc/socket-core/estado.env
+```
+
+Cron:
+```cron
+0 * * * * root set -a; . /etc/socket-core/estado.env; set +a; python3 /srv/infra/socket-core/scripts/estado.py >> /var/log/socketcore-estado.log 2>&1
+```
+
+systemd (timer):
+```ini
+# /etc/systemd/system/socketcore-estado.service
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/socket-core/estado.env
+ExecStart=/usr/bin/python3 /srv/infra/socket-core/scripts/estado.py
+```
+`EnvironmentFile` sigue exponiendo el valor a `systemctl show`/`/proc` según
+configuración; restringe el acceso al host y rota si sospechas fuga. La clave
+**nunca** va en el `ExecStart` ni en la línea de cron.
+
+## 9. Alta de clientes: paquete y ficha de operador
+
+`alta_cliente.py` escribe por defecto en `~/credenciales-socketcore` (creado 0700,
+fuera del repo). Se niega a escribir dentro de un worktree git salvo que el fichero
+esté ignorado (`git check-ignore`); el repo ignora `credenciales-*.txt`.
+Genera dos ficheros 0600: el **paquete del proyecto** (API key, URL, prefijo,
+scopes, snippet; SIN admin/contenedor/MASTER_KEY) y una **ficha de operador**
+(`operador-*.txt`, con instrucciones de revocación, sin secretos).
+No hay dominio fijo: define `SOCKET_PUBLIC_URL` o pasa `--core`.
+
+## 10. Sudoers restringido: por qué no se aplica solo
+
+Ver `docs/sudoers-deploy.example`. **No se aplica automáticamente**. Un `docker
+exec`/`docker compose` por sudoers es root-equivalente; el ejemplo documenta por qué
+no se delega Docker y la alternativa de wrappers root-owned. Procedimiento de
+aplicación y rollback están en el propio fichero.

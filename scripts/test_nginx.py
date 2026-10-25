@@ -70,8 +70,11 @@ def curl(url, headers=None):
 
 def main():
     if run(["docker", "version"]).returncode != 0:
-        print("[FALLO] Docker no disponible")
-        return 1
+        if os.environ.get("CI"):
+            print("[FALLO] Docker no disponible en CI (no se permite omitir)")
+            return 1
+        print("[SKIP] Docker no disponible en local; se omite (CI NO lo omite)")
+        return 0
     tmp = Path(tempfile.mkdtemp(prefix="sc-nginx-"))
     certs = tmp / "certs"
     live = certs / "live" / "ws.seventwo.tech"

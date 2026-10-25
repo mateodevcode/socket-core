@@ -6,15 +6,17 @@ Nginx (certificado), fail2ban y un veredicto final. Exit 0 = todo bien, 1 = aler
 
 Las estadísticas salen de GET /admin/stats del listener ADMIN (loopback), con
 MASTER_KEY. Ya NO hace falta una API key con prefijo "*".
+La MASTER_KEY NUNCA va en argv de procesos: para docker exec se pasa a curl por
+stdin (`-K -`). Solo se acepta SOCKET_MASTER_KEY o --master-key.
 
 Uso en el VPS:
     SOCKET_MASTER_KEY=... python3 scripts/estado.py
     # opcional: --admin http://127.0.0.1:3015 --master-key ...
     # si el admin no es alcanzable desde el host, se intenta vía
-    #   docker exec socket-core curl -s http://127.0.0.1:3015/admin/stats
+    #   docker exec socket-core curl ... (cabecera por stdin)
 
 Uso parcial (solo core público, sirve desde tu PC):
-    python3 scripts/estado.py --solo-core --core https://ws.seventwo.tech
+    python3 scripts/estado.py --solo-core --core https://tu-dominio.example
 
 Solo librería estándar.
 """
@@ -40,17 +42,10 @@ def pintar(ok: bool, nombre: str, detalle: str = "") -> bool:
 
 
 def leer_master(args) -> str:
+    """Solo --master-key o SOCKET_MASTER_KEY. Nunca ficheros sueltos en el repo."""
     if args.master_key:
         return args.master_key
-    if os.environ.get("SOCKET_MASTER_KEY"):
-        return os.environ["SOCKET_MASTER_KEY"]
-    for c in (".master_key", "../.master_key", "/srv/infra/socket-core/.master_key"):
-        if os.path.isfile(c):
-            with open(c, encoding="utf-8") as f:
-                v = f.read().strip()
-                if v:
-                    return v
-    return ""
+    return os.environ.get("SOCKET_MASTER_KEY", "")
 
 
 def get_json(url: str, headers: dict = None, timeout=10):
@@ -67,28 +62,72 @@ def get_json(url: str, headers: dict = None, timeout=10):
         return 0, {"_error": str(e)}
 
 
+def _curl_cfg(value: str) -> str:
+    """Escapa un valor para la configuración de curl (-K)."""
+    out = value.replace("\\", "\\\\").replace('"', '\\"')
+    out = out.replace("\n", "\\n").replace("\r", "\\r")
+    return '"' + out + '"'
+
+
+def docker_curl_json(
+    master: str,
+    port: str,
+    path: str,
+    method: str = "GET",
+    payload: str = "",
+    timeout: int = 10,
+):
+    """Curl dentro del contenedor con la cabecera por STDIN (-K -), nunca en argv.
+
+    Devuelve (status, texto). Lanza RuntimeError si no se puede ejecutar.
+    """
+    cfg = [
+        "url = " + _curl_cfg(f"http://127.0.0.1:{port}{path}"),
+        "request = " + _curl_cfg(method),
+        "header = " + _curl_cfg("X-Master-Key: " + master),
+        "silent",
+        "show-error",
+        "max-time = " + str(int(timeout)),
+        'write-out = "\\n%{http_code}"',
+    ]
+    if payload:
+        cfg.append("header = " + _curl_cfg("Content-Type: application/json"))
+        cfg.append("data = " + _curl_cfg(payload))
+    r = subprocess.run(
+        ["docker", "exec", "-i", "socket-core", "curl", "-sS", "-K", "-"],
+        input="\n".join(cfg) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=timeout + 5,
+        shell=False,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or f"curl exit {r.returncode}")
+    cuerpo, _, codigo = (r.stdout or "").rpartition("\n")
+    try:
+        return int(codigo.strip() or "0"), cuerpo
+    except ValueError:
+        return 0, r.stdout or ""
+
+
 def admin_stats(args, master: str):
     """GET /admin/stats directo; si no se alcanza, vía docker exec (loopback)."""
     url = f"{args.admin}/admin/stats"
     s, b = get_json(url, {"X-Master-Key": master})
     if s == 200:
         return s, b, "directo"
-    # El listener admin escucha en loopback del contenedor: probar docker exec.
     port = args.admin.rstrip("/").rsplit(":", 1)[-1] or "3015"
-    cmd = (
-        "docker exec socket-core curl -s --max-time 5 "
-        f"-H 'X-Master-Key: {master}' http://127.0.0.1:{port}/admin/stats"
-    )
-    r = sh(cmd)
-    if r and r.returncode == 0 and (r.stdout or "").strip():
-        try:
-            return 200, json.loads(r.stdout), "docker exec"
-        except Exception:
-            pass
+    try:
+        code, texto = docker_curl_json(master, port, "/admin/stats")
+        if code == 200:
+            return 200, json.loads(texto), "docker exec"
+    except Exception:
+        pass
     return s, b, "directo"
 
 
 def sh(cmd: str):
+    """Solo comandos sin secretos y sin interpolación de datos sensibles."""
     try:
         return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
     except Exception:
@@ -161,7 +200,6 @@ def main() -> int:
 
     print(f"== socket-core @ {args.core} ==")
 
-    # 1. Contenedor + salud local
     if not args.solo_core:
         r = sh("docker inspect -f '{{.State.Status}}|{{.State.StartedAt}}' socket-core 2>/dev/null")
         if r and r.returncode == 0 and r.stdout.strip().startswith("running"):
@@ -179,7 +217,6 @@ def main() -> int:
         if not check_trusted_proxies():
             alertas.append("TRUSTED_PROXIES sin configurar/incorrecto")
 
-    # 2. Salud pública + stats
     s, b = get_json(f"{args.core}/health")
     if s == 200:
         pintar(True, "health público")
@@ -208,7 +245,6 @@ def main() -> int:
             pintar(False, "admin/stats", b.get("error", f"HTTP {s}"))
             alertas.append("admin/stats con error")
 
-    # 4. Borde: nginx + cert + fail2ban
     if not args.solo_core:
         print("")
         r = sh("systemctl is-active nginx 2>/dev/null || service nginx status 2>/dev/null | head -1")
@@ -220,7 +256,6 @@ def main() -> int:
 
         host = args.core.split("://", 1)[-1].split("/", 1)[0].split(":")[0]
         if args.core.startswith("https"):
-            # Lo que el mundo ve: handshake TLS con SNI (sin necesitar permisos root).
             try:
                 ctx = ssl.create_default_context()
                 with ctx.wrap_socket(

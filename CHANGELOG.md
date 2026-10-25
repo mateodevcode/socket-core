@@ -499,6 +499,26 @@ sección de cada fase.
 - **S8**: `scripts/verify_action_shas.py` comprueba que cada SHA de action coincide
   con la etiqueta del comentario; integrado en CI.
 
+
+### Fase 8.8 — Secretos fuera de argv y alta segura (U1–U6)
+
+- **U1**: `estado.py` y `alta_cliente.py` pasan la MASTER_KEY a curl por **stdin**
+  (`curl -K -`) dentro de `docker exec`; nunca en argv ni en cadenas de shell.
+  Tests con `subprocess.run` simulado.
+- **U2**: `estado.py` ya no lee `.master_key`; solo env/arg. Documentado cron/systemd
+  con `EnvironmentFile` 0600 de root.
+- **U3**: salida por defecto `~/credenciales-socketcore` (0700), `credenciales-*.txt`
+  ignorado en git/Docker, rechazo a escribir en worktree sin ignorar, paquete sin
+  admin/contenedor/MASTER y ficha de operador aparte, validación numérica clara y
+  sin dominio fijo (env/`--core`).
+- **U4**: 33 tests de Python en el job `python`; `test_nginx.py` en job `nginx`,
+  `test_fail2ban.sh` en job `fail2ban` y `verify_action_shas.py` en `quality`.
+  Los scripts hacen skip explícito solo en local sin Docker/fail2ban/red; en CI fallan.
+- **U5**: filtro fail2ban final validado con `fail2ban-regex` (2 coincidencias
+  401/403; 200/429 y línea tricky fuera).
+- **U6**: `docs/sudoers-deploy.example` documenta por qué **no** se delega Docker por
+  sudoers y la alternativa con wrappers root-owned; procedimiento y rollback (no se aplica).
+
 ### Nota de estado
 
 - La suite de integración en `tests/` define el comportamiento objetivo: los

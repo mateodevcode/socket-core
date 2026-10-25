@@ -9,3 +9,4 @@ target
 .github
 node_modules
 salida.md
+credenciales-*.txt

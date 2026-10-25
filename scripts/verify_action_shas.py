@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Verifica que cada action@SHA de ci.yml coincide con la etiqueta del comentario."""
+import os
 import re
 import subprocess
 import sys
