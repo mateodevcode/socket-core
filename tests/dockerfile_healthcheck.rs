@@ -18,4 +18,18 @@ fn healthcheck_prueba_ambos_listeners() {
         "healthcheck debe probar el admin: {}",
         hc
     );
+
+    // docker-compose define SU PROPIO healthcheck (sobreescribe el del Dockerfile).
+    let dc = std::fs::read_to_string("docker-compose.yml").expect("docker-compose.yml");
+    let bloque = dc
+        .lines()
+        .skip_while(|l| !l.contains("healthcheck:"))
+        .take(6)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        bloque.contains("3005/health") && bloque.contains("3015/health"),
+        "el healthcheck de compose debe probar AMBOS listeners: {}",
+        bloque
+    );
 }

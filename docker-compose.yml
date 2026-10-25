@@ -37,7 +37,12 @@ services:
     networks:
       - central_network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:3005/health"]
+      # Prueba AMBOS listeners (público y admin) dentro del contenedor.
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://127.0.0.1:3005/health >/dev/null && curl -fsS http://127.0.0.1:3015/health >/dev/null",
+        ]
       interval: 30s
       timeout: 5s
       retries: 3
