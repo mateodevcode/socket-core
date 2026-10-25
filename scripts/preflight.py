@@ -17,6 +17,7 @@ no bloquean.
 
 import argparse
 import datetime
+import ipaddress
 import json
 import os
 import sqlite3
@@ -59,6 +60,35 @@ def prefijos_solapados(keys):
             if any(_overlap(x, y) for x in ai for y in bj):
                 pares.append((keys[i].get("name"), keys[j].get("name")))
     return pares
+
+
+def trusted_proxies_problemas(trusted, candidatas):
+    """Comprueba TRUSTED_PROXIES contra las IPs candidatas (gateway/IPs de la red)."""
+    entradas = [x.strip() for x in str(trusted or "").split(",") if x.strip()]
+    problemas = []
+    if not entradas:
+        return ["TRUSTED_PROXIES vacío: se ignorará X-Forwarded-For"]
+    redes = []
+    for e in entradas:
+        try:
+            net = ipaddress.ip_network(e, strict=False)
+        except ValueError:
+            problemas.append(f"TRUSTED_PROXIES inválido: {e}")
+            continue
+        tope = 16 if net.version == 4 else 48
+        if net.prefixlen <= tope:
+            problemas.append(f"TRUSTED_PROXIES con subred demasiado ancha: {e}")
+        redes.append(net)
+    if candidatas:
+        incluye = any(
+            ipaddress.ip_address(str(ip)) in net for ip in candidatas for net in redes
+        )
+        if not incluye:
+            problemas.append(
+                "TRUSTED_PROXIES no incluye el gateway/IP de central_network: "
+                + ", ".join(str(c) for c in candidatas)
+            )
+    return problemas
 
 
 def analizar(keys, canales, ahora=None):
@@ -182,6 +212,11 @@ def main():
     ap.add_argument("--admin", default="http://127.0.0.1:3015")
     ap.add_argument("--master-key", default=os.environ.get("SOCKET_MASTER_KEY", ""))
     ap.add_argument("--db", default="", help="copia local de la SQLite (recomendado)")
+    ap.add_argument(
+        "--trusted-proxies",
+        default=os.environ.get("TRUSTED_PROXIES", ""),
+        help="valor de TRUSTED_PROXIES (por defecto, el del entorno)",
+    )
     args = ap.parse_args()
 
     if not args.master_key:
@@ -207,6 +242,25 @@ def main():
         print("[AVISO] Sin copia de SQLite: no se pueden analizar canales/huérfanos/cascada.")
 
     rep = analizar(keys, canales)
+
+    # R9: TRUSTED_PROXIES vs gateway real (si Docker está disponible).
+    candidatas = []
+    try:
+        gw = subprocess.run(
+            ["docker", "network", "inspect", "central_network",
+             "--format", "{{range .IPAM.Config}}{{.Gateway}} {{end}}"],
+            capture_output=True, text=True, timeout=10,
+        )
+        red = subprocess.run(
+            ["docker", "network", "inspect", "central_network",
+             "--format", "{{range .Containers}}{{.IPv4Address}} {{end}}"],
+            capture_output=True, text=True, timeout=10,
+        )
+        candidatas = [x.split("/")[0] for x in (gw.stdout + " " + red.stdout).split() if x.strip()]
+    except Exception:
+        pass
+    tp_problemas = trusted_proxies_problemas(args.trusted_proxies, candidatas)
+    rep["problemas"].extend(tp_problemas)
 
     print("\n-- canales por proyecto --")
     for nombre, n in sorted(rep["canales_por_proyecto"].items()):

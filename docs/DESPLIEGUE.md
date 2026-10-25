@@ -121,7 +121,7 @@ echo "backup: backups/data-$STAMP.tgz"
 ```
 
 El propio deploy automático hace también este backup (retención de 10) y guarda el
-commit previo en `.last_deploy_commit`.
+commit previo en `.last_good_commit`.
 
 ### 0.4 Avisa a los clientes de los cambios incompatibles
 
@@ -148,12 +148,17 @@ Resumen (detalle y migración en `CHANGELOG.md`):
 > tome el relevo.
 
 El despliegue es automático: push a `main` → workflow **CI** (`quality`) → si pasa,
-job **deploy** (needs) entra por SSH, hace backup, actualiza, reconstruye y espera
-hasta **60 s** a que `/health` responda en el puerto público **y** en el admin dentro
-del contenedor. Si no responde, hace **rollback automático**: vuelve al commit de
-`.last_deploy_commit`, restaura el backup más reciente, reconstruye, reverifica 60 s
-y **marca el job como fallido** (`exit 1`) para que se investigue. No se despliega
-si CI falla.
+job **deploy** (needs de quality/sdk/python/docker) exige el entorno
+**`production`** (con revisor) y ejecuta por SSH el script versionado
+`scripts/deploy.sh` desde `origin/main`. El script:
+- hace un **backup consistente** de SQLite (API backup + `integrity_check`),
+- espera hasta 60 s a `/health` en el puerto público **y** el admin,
+- si falla, hace **rollback** al commit de `.last_good_commit` (que **solo** se
+  escribe tras salud + chequeo público), restaura el backup, reconstruye y
+  reverifica; el job termina con **exit 1**,
+- aplica Nginx con **backup y restauración** si `nginx -t`/reload fallan,
+- ya no copia `.env` a `/tmp` (umask 077).
+No se despliega si CI falla.
 
 Manual (solo si es necesario):
 
@@ -223,14 +228,14 @@ Salud esperada: `{"service":"socket-core","status":"ok"}` en ambos puertos y
 
 ## 3. Rollback
 
-El deploy guarda el commit anterior en `.last_deploy_commit` y backups fechados en
+El deploy guarda el commit anterior en `.last_good_commit` y backups fechados en
 `backups/`.
 
 ```bash
 cd /srv/infra/socket-core
 
 # 1) Volver al código anterior
-PREV=$(cat .last_deploy_commit)
+PREV=$(cat .last_good_commit)
 git fetch origin
 git reset --hard "$PREV"
 

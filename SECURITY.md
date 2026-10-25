@@ -27,8 +27,10 @@ GitHub) y los pasos manuales de seguridad que debes completar una vez.
 5. **Secret scanning + Push protection** (Settings → Code security):
    activa *Secret scanning* y *Push protection*.
 6. **Dependabot alerts** y *Dependabot security updates* activados.
-7. **Environments** (opcional recomendado): crea `production` con required
-   reviewers y limita los secrets `VPS_*` a ese environment.
+7. **Environments (OBLIGATORIO con el CI actual)**: crea el entorno
+   **`production`** en Settings → Environments y exige **required reviewers**
+   (el job `deploy` declara `environment: production`). Limita los secrets `VPS_*`
+   a ese entorno para que un PR no pueda desplegar.
 8. Verifica que el workflow **Deploy** solo corre tras CI en verde
    (`workflow_run` sobre `main`); un CI rojo no despliega.
 
@@ -112,7 +114,7 @@ por versión exacta (`checkout@v4.2.2`, `rust-toolchain@1.97.0`,
 
 ## 7. Backup y rollback del despliegue
 
-Antes de reconstruir, el deploy guarda el commit anterior en `.last_deploy_commit`
+Antes de reconstruir, el deploy guarda el commit anterior en `.last_good_commit`
 y un backup fechado del volumen en `backups/data-AAAAMMDD-HHMMSS.tgz`.
 
 **Rollback documentado:**
@@ -121,7 +123,7 @@ y un backup fechado del volumen en `backups/data-AAAAMMDD-HHMMSS.tgz`.
 cd /srv/infra/socket-core
 
 # 1) Volver al commit que funcionaba
-PREV=$(cat .last_deploy_commit)
+PREV=$(cat .last_good_commit)
 git fetch origin
 git reset --hard "$PREV"
 

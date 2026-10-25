@@ -444,7 +444,7 @@ fail2ban y `TRUSTED_PROXIES`.
 ### 7.3 Backups y restauración
 
 - El deploy guarda `backups/data-AAAAMMDD-HHMMSS.tgz` **antes** de reconstruir
-  (retención de 10) y registra el commit previo en `.last_deploy_commit`.
+  (retención de 10) y registra el commit previo en `.last_good_commit`.
 - Manual: `sudo tar czf backup.tgz data` con el contenedor parado o aceptando la
   consistencia de SQLite (mejor parar).
 - Restaurar: parar, descomprimir sobre `data/`, `sudo chown -R 10001:10001 data`,

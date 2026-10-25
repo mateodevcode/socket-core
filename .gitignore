@@ -14,3 +14,4 @@ __pycache__/
 backups/
 .last_deploy_commit
 node_modules/
+.last_good_commit

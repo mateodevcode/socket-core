@@ -34,6 +34,18 @@ fn entrypoint_no_tiene_crlf() {
 }
 
 #[test]
+fn scripts_sh_no_tienen_crlf() {
+    for f in ["docker-entrypoint.sh", "scripts/deploy.sh"] {
+        let bytes = std::fs::read(f).unwrap_or_else(|_| panic!("falta {}", f));
+        assert!(
+            !bytes.windows(2).any(|w| w == b"\r\n"),
+            "{} no debe contener CRLF (shellcheck/CI)",
+            f
+        );
+    }
+}
+
+#[test]
 fn dockerfile_usa_locked_y_digests() {
     let d = std::fs::read_to_string("Dockerfile").expect("Dockerfile");
     let builds = d.matches("cargo build --release").count();

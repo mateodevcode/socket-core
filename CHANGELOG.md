@@ -291,7 +291,7 @@ sección de cada fase.
   (`docker network inspect ... .IPAM.Config.Gateway`) o la IP del contenedor Nginx;
   `scripts/estado.py` verifica que la configuración lo incluya.
 - **Deploy**: backup fechado `backups/data-AAAAMMDD-HHMMSS.tgz` ANTES de reconstruir
-  (retención 10), guarda el commit previo en `.last_deploy_commit`, y **rollback
+  (retención 10), guarda el commit previo en `.last_good_commit`, y **rollback
   documentado** en `SECURITY.md §7` (commit anterior + restaurar backup + rebuild).
 - **CI/CD unificado**: `ci.yml` con jobs `quality` y `deploy` (`needs: [quality]`,
   solo push a `main`): el deploy no arranca si CI falla. Actions fijadas por versión
@@ -455,6 +455,27 @@ sección de cada fase.
   nombres).
 - **Q8**: `busy_timeout` en el pool y SQLite BUSY → **503 + Retry-After**.
 - **Q9**: repetida la fila P4 del informe (ver entrega).
+
+
+### Fase 8.6 — Deploy reproducible y cadena de suministro (R1–R9)
+
+- **R1/R2/R3/R5**: deploy extraído a `scripts/deploy.sh` (ejecutado por SSH desde
+  `origin/main`), probado con binarios simulados: éxito, build fallido, salud
+  fallida con **rollback a `.last_good_commit`** y `nginx -t` fallido con
+  restauración. `.last_good_commit` solo se escribe tras salud + chequeo público.
+  Sin copia de `.env` a `/tmp` (`umask 077`). Shellcheck en CI.
+- **R4**: backup consistente con la API de `sqlite3` + `integrity_check`
+  (`scripts/sqlite_backup.py`) y tests de restauración.
+- **R6**: concurrency por job (deploy `cancel-in-progress: false`), `environment:
+  production` (revisor obligatorio, documentado), actions fijadas por **SHA** y
+  `cargo-audit` fijado a 0.22.2.
+- **R7**: job `docker` en CI (imagen, salud 3005/3015, uid 10001, binario >5 MB,
+  FS read-only, JWT débil => exit 1). Verificado también localmente.
+- **R8**: imagen reconstruida con digests; política `on-failure:5` probada con un
+  contenedor que falla de verdad (5 reinicios y queda parado). No se reinició el
+  daemon Docker (disruptivo).
+- **R9**: `preflight.py` y `estado.py` comparan `TRUSTED_PROXIES` con el gateway de
+  `central_network` y alertan de subredes anchas (/16 o mayores).
 
 ### Nota de estado
 

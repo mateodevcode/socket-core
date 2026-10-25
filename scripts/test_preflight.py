@@ -91,3 +91,27 @@ class TestAnalizar(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTrustedProxies(unittest.TestCase):
+    def test_vacio_avisa(self):
+        p = pf.trusted_proxies_problemas("", ["172.18.0.1"])
+        self.assertTrue(any("vacío" in x for x in p))
+
+    def test_no_incluye_gateway(self):
+        p = pf.trusted_proxies_problemas("10.0.0.5", ["172.18.0.1"])
+        self.assertTrue(any("no incluye" in x for x in p))
+
+    def test_incluye_gateway_ok(self):
+        p = pf.trusted_proxies_problemas("172.18.0.1", ["172.18.0.1"])
+        self.assertEqual(p, [])
+
+    def test_subred_muy_ancha(self):
+        p = pf.trusted_proxies_problemas("172.16.0.0/12", ["172.18.0.1"])
+        self.assertTrue(any("ancha" in x for x in p))
+        p2 = pf.trusted_proxies_problemas("10.0.0.0/8", ["172.18.0.1"])
+        self.assertTrue(any("ancha" in x for x in p2))
+
+    def test_cidr_estrecha_ok(self):
+        p = pf.trusted_proxies_problemas("172.18.0.0/24", ["172.18.0.1"])
+        self.assertEqual(p, [])

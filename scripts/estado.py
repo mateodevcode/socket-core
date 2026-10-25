@@ -21,6 +21,7 @@ Solo librería estándar.
 
 import argparse
 import datetime
+import ipaddress
 import json
 import os
 import ssl
@@ -114,17 +115,31 @@ def trusted_proxies_config() -> str:
     return ""
 
 
+def _subred_ancha(entrada: str) -> bool:
+    try:
+        net = ipaddress.ip_network(entrada.strip(), strict=False)
+    except ValueError:
+        return False
+    tope = 16 if net.version == 4 else 48
+    return net.prefixlen <= tope
+
+
 def check_trusted_proxies() -> bool:
-    """Comprueba que la IP del gateway (o la de un contenedor de la red) esté confiada."""
+    """Comprueba gateway/IPs y que no se confíe una subred demasiado ancha."""
     trusted = trusted_proxies_config()
     gw = red_gateway()
     candidatas = ([gw] if gw else []) + red_containers()
+    entradas = [t.strip() for t in trusted.split(",") if t.strip()]
     if not trusted:
         print(f"[AVISO] TRUSTED_PROXIES vacío: se ignora X-Forwarded-For y el rate limit "
               f"por IP verá el gateway {gw or '?'}. Si Nginx está delante, añade esa IP.")
         return False
+    anchas = [e for e in entradas if _subred_ancha(e)]
+    if anchas:
+        pintar(False, "TRUSTED_PROXIES", f"subred demasiado ancha: {', '.join(anchas)}")
+        return False
     for ip in candidatas:
-        if ip and ip in [t.strip() for t in trusted.split(",")]:
+        if ip and ip in entradas:
             pintar(True, "TRUSTED_PROXIES", f"contiene {ip}")
             return True
     print(f"[AVISO] TRUSTED_PROXIES={trusted!r} no incluye el gateway {gw or '?'} "

@@ -57,7 +57,7 @@ curl http://127.0.0.1:3005/health       # {"status":"ok","service":"socket-core"
 En el VPS el deploy es automático por GitHub Actions (push a `main`, **solo si CI
 pasa**); lo único manual es pegar el `.env` una vez. Antes de reconstruir se guarda
 `backups/data-<fecha>.tgz` (retención 10) y el commit previo en
-`.last_deploy_commit`; el rollback está documentado en `SECURITY.md §7`.
+`.last_good_commit`; el rollback está documentado en `SECURITY.md §7`.
 
 **TRUSTED_PROXIES**: el hub ve el tráfico desde el gateway de `central_network`
 (o la IP del contenedor de Nginx si está en esa red). Averígualo con:
@@ -406,7 +406,7 @@ curl -X POST https://hub.ejemplo.com/channels/tuproyecto:chat/events \
 ## 6. Operación
 
 - **Backups:** el deploy guarda `backups/data-<fecha>.tgz` antes de reconstruir
-  (retención 10) y el commit previo en `.last_deploy_commit`. Ver
+  (retención 10) y el commit previo en `.last_good_commit`. Ver
   [`docs/DESPLIEGUE.md`](docs/DESPLIEGUE.md).
 - **Monitoreo:** `SOCKET_MASTER_KEY=... python3 scripts/estado.py` — contenedor,
   salud, `/admin/stats` por proyecto, Nginx, certificado, fail2ban y coherencia de
