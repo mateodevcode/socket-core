@@ -117,3 +117,18 @@ async fn init_state_no_crea_bootstrap_en_produccion() {
     let st = socket_core::init_state(&c).await;
     assert_eq!(st.keys.count().await.unwrap(), 0);
 }
+
+#[test]
+fn shutdown_grace_debe_ser_menor_que_el_stop_grace_period() {
+    let base = |secs: u64| {
+        let mut c = cfg(common::JWT_SECRET, common::MASTER_KEY);
+        c.shutdown_grace_secs = secs;
+        c
+    };
+    assert!(base(0).validate_secrets().is_err(), "0 no vale");
+    assert!(base(19).validate_secrets().is_ok());
+    assert!(
+        base(20).validate_secrets().is_err(),
+        ">=20 colisiona con stop_grace_period=20s"
+    );
+}

@@ -313,3 +313,28 @@ async fn alta_concurrente_mismo_prefijo_solo_una_gana() {
         "solo una alta concurrente puede ganar el prefijo"
     );
 }
+
+// ---------- Q8: SQLite BUSY => 503 + Retry-After ----------
+
+#[tokio::test]
+async fn alta_con_db_bloqueada_da_503_con_retry_after() {
+    let hub = Hub::start().await;
+    // Tomamos el lock de escritura en otra conexión del pool.
+    let mut conn = hub.state.keys.pool.acquire().await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+
+    let res = post_key(
+        &hub,
+        json!({"name":"busy-key","channel_prefix":"busy:*","scopes":["publish"]}),
+    )
+    .await;
+    let tiene_retry = res.headers().get("retry-after").is_some();
+    let status = res.status().as_u16();
+    let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+
+    assert_eq!(status, 503, "DB bloqueada debe responder 503, no 500");
+    assert!(tiene_retry, "503 debe incluir Retry-After");
+}

@@ -59,6 +59,14 @@ GitHub) y los pasos manuales de seguridad que debes completar una vez.
   (`127.0.0.0/8`, `::1`) y `0.0.0.0/0`/`::/0`. Averígualo en §5.
 - Nginx sobrescribe `X-Forwarded-For` con `$remote_addr`; no lo cambies a
   `$proxy_add_x_forwarded_for`.
+- **Riesgo residual de `apt`**: las imágenes base están fijadas por digest, pero los
+  paquetes apt que instala el Dockerfile (`curl`, `libsqlite3-0`, `ca-certificates`,
+  `libsqlite3-dev`, `pkg-config`) **no** están pinneados por versión. Reconstruye la
+  imagen periódicamente y deja que Dependabot/Docker actualice el digest.
+- **Secretos y `env_file`**: las variables del `.env` quedan visibles con
+  `docker inspect socket-core` y `docker exec socket-core env`. Cualquiera con acceso
+  al daemon Docker las ve (equivale a root). Protege el socket Docker, usa `.env` con
+  permisos 600 y rota secretos si sospechas acceso.
 
 ## 4. Acceso a /admin (vía elegida)
 

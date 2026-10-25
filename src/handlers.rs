@@ -457,6 +457,7 @@ pub async fn admin_create_key(
                 .into_response()
         }
         Err(e) if e == "name ya existe" => err(StatusCode::CONFLICT, e),
+        Err(e) if e == "busy" => err(StatusCode::SERVICE_UNAVAILABLE, "busy"),
         Err(e) if e.starts_with("prefix_conflict:") => {
             let otra = e.trim_start_matches("prefix_conflict:");
             err(
@@ -707,7 +708,7 @@ fn err(code: StatusCode, msg: impl Into<String>) -> axum::response::Response {
         error: Some(msg.into()),
     });
     let mut resp = (code, body).into_response();
-    if code == StatusCode::TOO_MANY_REQUESTS {
+    if code == StatusCode::TOO_MANY_REQUESTS || code == StatusCode::SERVICE_UNAVAILABLE {
         resp.headers_mut().insert(
             axum::http::header::RETRY_AFTER,
             axum::http::HeaderValue::from_static("60"),

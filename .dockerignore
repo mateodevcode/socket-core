@@ -1,0 +1,11 @@
+# Nunca enviar secretos, datos, backups ni repos ajenos al contexto de build.
+.env
+.env.*
+data
+backups
+proyectos
+target
+.git
+.github
+node_modules
+salida.md

@@ -111,6 +111,12 @@ impl AppConfig {
         if !(60..=3600).contains(&self.jwt_ttl_secs) {
             return Err("JWT_TTL_SECS debe estar entre 60 y 3600".into());
         }
+        if self.shutdown_grace_secs == 0 || self.shutdown_grace_secs >= 20 {
+            return Err(
+                "SHUTDOWN_GRACE_SECS debe estar entre 1 y 19 (stop_grace_period del contenedor es 20 s)"
+                    .into(),
+            );
+        }
         if self.allow_bootstrap && !self.is_dev() {
             return Err("ALLOW_BOOTSTRAP=true solo está permitido con APP_ENV=dev".into());
         }

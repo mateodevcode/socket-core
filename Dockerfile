@@ -1,7 +1,7 @@
 # ============================================
 # socket-core — imagen multi-stage, no root
 # ============================================
-FROM rust:1.97-bookworm AS builder
+FROM rust:1.97-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 AS builder
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config libsqlite3-dev \
@@ -9,14 +9,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY Cargo.toml Cargo.lock ./
 # Cache de dependencias con un src vacío
 RUN mkdir src && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs \
-    && cargo build --release || true
+    && cargo build --release --locked || true
 RUN rm -rf src
 COPY src ./src
 # COPY puede conservar mtimes antiguos y Cargo creería que el binario dummy
 # (del cache de dependencias) sigue al día. Forzamos mtime antes de compilar.
-RUN find src -type f -exec touch {} + && cargo build --release
+RUN find src -type f -exec touch {} + && cargo build --release --locked
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates libsqlite3-0 curl \
     && rm -rf /var/lib/apt/lists/* \

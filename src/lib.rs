@@ -190,6 +190,29 @@ pub async fn init_state(cfg: &config::AppConfig) -> handlers::AppState {
         }
     }
 
+    // Q7: avisos de configuración de keys existentes (SOLO nombres, nunca secretos).
+    if let Ok(keys_list) = keys.list().await {
+        for k in &keys_list {
+            if let Err(e) = crate::models::validate_scopes(&k.scopes) {
+                tracing::warn!("key '{}' con scopes inválidos: {}", k.name, e);
+            }
+        }
+        for i in 0..keys_list.len() {
+            for j in (i + 1)..keys_list.len() {
+                if crate::keys::prefixes_overlap(
+                    &keys_list[i].channel_prefixes,
+                    &keys_list[j].channel_prefixes,
+                ) {
+                    tracing::warn!(
+                        "keys '{}' y '{}' tienen prefijos solapados",
+                        keys_list[i].name,
+                        keys_list[j].name
+                    );
+                }
+            }
+        }
+    }
+
     let state = handlers::AppState {
         channel_manager: channel_manager::ChannelManager::new(),
         keys,

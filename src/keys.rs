@@ -452,7 +452,14 @@ impl KeyStore {
         sqlx::query("BEGIN IMMEDIATE")
             .execute(&mut *conn)
             .await
-            .map_err(|_| "internal error".to_string())?;
+            .map_err(|e| {
+                if es_busy(&e) {
+                    "busy".to_string()
+                } else {
+                    tracing::error!("create key: BEGIN IMMEDIATE: {}", e);
+                    "internal error".to_string()
+                }
+            })?;
 
         let resultado: Result<(), String> = async {
             let existe: Option<(String,)> =
@@ -496,8 +503,11 @@ impl KeyStore {
             .execute(&mut *conn)
             .await
             .map_err(|e| {
-                if e.to_string().contains("api_keys.name") {
+                let msg = e.to_string();
+                if msg.contains("api_keys.name") {
                     "name ya existe".to_string()
+                } else if es_busy(&e) {
+                    "busy".to_string()
                 } else {
                     tracing::error!("create key: error de DB: {}", e);
                     "internal error".to_string()
@@ -574,6 +584,11 @@ impl KeyStore {
     }
 }
 
+fn es_busy(e: &sqlx::Error) -> bool {
+    let s = e.to_string().to_lowercase();
+    s.contains("database is locked") || s.contains("busy")
+}
+
 // ---- Policy helpers (puros, testeables) ----
 
 /// Origin/Referer permitido para esta key.
@@ -631,6 +646,20 @@ fn prefix_bases(prefix_s: &str) -> Vec<String> {
         .filter(|p| !p.is_empty())
         .map(|p| p.to_string())
         .collect()
+}
+
+/// ¿Se solapan dos listas de prefijos? (misma semántica que el alta de keys)
+pub fn prefixes_overlap(a: &[String], b: &[String]) -> bool {
+    let ab: Vec<String> = a.iter().flat_map(|s| prefix_bases(s)).collect();
+    let bb: Vec<String> = b.iter().flat_map(|s| prefix_bases(s)).collect();
+    for x in &ab {
+        for y in &bb {
+            if bases_overlap(x, y) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn bases_overlap(a: &str, b: &str) -> bool {

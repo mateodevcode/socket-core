@@ -439,6 +439,23 @@ sección de cada fase.
 - **P8**: documentado el borrado en cascada, la liberación del prefijo y el efecto de
   renombrar una key en el `source` de los mensajes nuevos.
 
+
+### Fase 8.5 — Empaquetado, dependencias y preflight (Q1–Q9)
+
+- **Q1**: `stop_grace_period: 20s`; `SHUTDOWN_GRACE_SECS` validado 1–19.
+- **Q2**: `.dockerignore` (sin `.env*`, `data`, `backups`, `proyectos`, `target`,
+  `.git`, `node_modules`) y `.gitattributes` con `*.sh text eol=lf`.
+- **Q3**: Dockerfile y CI con `cargo ... --locked`.
+- **Q4**: imágenes base fijadas por digest; Dependabot para cargo, npm (SDK y
+  ejemplo), github-actions y docker. Documentado el riesgo residual de `apt`.
+- **Q5**: documentado que `env_file` expone secretos a `docker inspect/exec`;
+  `restart: on-failure:5` evaluado y aplicado.
+- **Q6**: `scripts/preflight.py` (solo lectura) con tests sobre SQLite sintética.
+- **Q7**: al arrancar, WARN por key con scopes inválidos o prefijos solapados (solo
+  nombres).
+- **Q8**: `busy_timeout` en el pool y SQLite BUSY → **503 + Retry-After**.
+- **Q9**: repetida la fila P4 del informe (ver entrega).
+
 ### Nota de estado
 
 - La suite de integración en `tests/` define el comportamiento objetivo: los

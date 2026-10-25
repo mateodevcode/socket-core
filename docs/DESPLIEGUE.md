@@ -168,6 +168,29 @@ docker compose up -d --remove-orphans
 Notas del contenedor: `read_only: true`, `cap_drop: ALL`, `no-new-privileges`,
 `tmpfs /tmp`. Solo escribe en `/app/data` (volumen) y `/tmp`.
 
+### 1.1 Notas de operación del contenedor
+
+- `SHUTDOWN_GRACE_SECS` debe ser **1–19** (el compose usa `stop_grace_period: 20s`);
+  el arranque rechaza 0 o ≥20.
+- `restart: on-failure:5`: tras 5 fallos seguidos el contenedor queda parado para no
+  entrar en bucle. Revisa `docker compose logs` y vuelve a `up -d` tras corregir.
+  Alternativa: `unless-stopped` (reintenta indefinidamente; enmascara crash loops).
+- **`env_file` expone secretos** en `docker inspect socket-core` y
+  `docker exec socket-core env`. Quien tenga acceso al socket Docker los ve (es
+  equivalente a root). Mantén `.env` en 600 y restringe el acceso al daemon.
+- **Preflight (solo lectura)**: antes de tocar keys/canales, ejecuta:
+
+  ```bash
+  SOCKET_MASTER_KEY=$(grep ^MASTER_KEY= .env | cut -d= -f2) python3 scripts/preflight.py
+  # recomendado con copia de la DB para analizar canales/huérfanos/cascada:
+  docker cp socket-core:/app/data/socket-core.db /tmp/preflight.db
+  python3 scripts/preflight.py --db /tmp/preflight.db
+  ```
+
+  Informa scopes inválidos, prefijos solapados (incluidas revocadas), expiraciones,
+  canales por proyecto, huérfanos y cuántos canales se borrarían al eliminar cada key.
+  Exit != 0 si hay bloqueantes. **No modifica nada.**
+
 ## 2. Verificación posterior
 
 ```bash
