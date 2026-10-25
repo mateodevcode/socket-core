@@ -24,6 +24,8 @@ pub const WS_AUTH_RECHECK_SECS: u64 = 2;
 pub const CLEANUP_INTERVAL_SECS: u64 = 300;
 /// Entradas del rate limiter más viejas que esto se purgan.
 pub const RATE_LIMITER_TTL_SECS: u64 = 120;
+/// Contadores de fallos de admin sin bloqueo expiran pasado este TTL.
+pub const ADMIN_FAIL_TTL_SECS: u64 = 900;
 
 use dashmap::DashMap;
 

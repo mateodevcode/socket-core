@@ -111,6 +111,9 @@ impl AppConfig {
         if !(60..=3600).contains(&self.jwt_ttl_secs) {
             return Err("JWT_TTL_SECS debe estar entre 60 y 3600".into());
         }
+        if self.allow_bootstrap && !self.is_dev() {
+            return Err("ALLOW_BOOTSTRAP=true solo está permitido con APP_ENV=dev".into());
+        }
         for p in &self.trusted_proxies {
             let net =
                 parse_ip_or_cidr(p).ok_or_else(|| format!("TRUSTED_PROXIES inválido: {}", p))?;

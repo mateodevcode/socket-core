@@ -129,9 +129,16 @@ pub fn secure_compare(a: &str, b: &str) -> bool {
 }
 
 /// Estado del bloqueo temporal del admin por IP tras fallos de MASTER_KEY.
+#[derive(Clone, Copy)]
+struct AdminFail {
+    count: u32,
+    locked_until: Option<Instant>,
+    last: Instant,
+}
+
 #[derive(Clone, Default)]
 pub struct AdminGuard {
-    state: Arc<DashMap<String, (u32, Option<Instant>)>>,
+    state: Arc<DashMap<String, AdminFail>>,
 }
 
 impl AdminGuard {
@@ -141,7 +148,7 @@ impl AdminGuard {
 
     fn is_locked(&self, ip: &str) -> bool {
         match self.state.get(ip) {
-            Some(entry) => match entry.1 {
+            Some(entry) => match entry.locked_until {
                 Some(until) => Instant::now() < until,
                 None => false,
             },
@@ -150,12 +157,32 @@ impl AdminGuard {
     }
 
     fn record_failure(&self, ip: &str, fail_max: u32, lock_secs: u64) {
-        let mut entry = self.state.entry(ip.to_string()).or_insert((0, None));
-        entry.0 = entry.0.saturating_add(1);
-        if entry.0 >= fail_max {
-            entry.1 = Some(Instant::now() + Duration::from_secs(lock_secs));
-            entry.0 = 0;
+        let now = Instant::now();
+        let mut entry = self.state.entry(ip.to_string()).or_insert(AdminFail {
+            count: 0,
+            locked_until: None,
+            last: now,
+        });
+        entry.count = entry.count.saturating_add(1);
+        entry.last = now;
+        if entry.count >= fail_max {
+            entry.locked_until = Some(now + Duration::from_secs(lock_secs));
+            entry.count = 0;
         }
+    }
+
+    /// Número de fallos acumulados sin bloqueo (para tests/observabilidad).
+    pub fn failure_count(&self, ip: &str) -> u32 {
+        self.state.get(ip).map(|e| e.count).unwrap_or(0)
+    }
+
+    /// Purga contadores sin bloqueo más viejos que `ttl`; mantiene bloqueos activos.
+    pub fn cleanup_with_ttl(&self, ttl: Duration) {
+        let now = Instant::now();
+        self.state.retain(|_, e| match e.locked_until {
+            Some(u) => now < u,
+            None => now.duration_since(e.last) <= ttl,
+        });
     }
 
     fn record_success(&self, ip: &str) {
@@ -163,9 +190,7 @@ impl AdminGuard {
     }
 
     pub fn cleanup(&self) {
-        let now = Instant::now();
-        self.state
-            .retain(|_, (_, until)| until.map(|u| now < u).unwrap_or(true));
+        self.cleanup_with_ttl(Duration::from_secs(crate::limits::ADMIN_FAIL_TTL_SECS));
     }
 }
 
@@ -385,5 +410,30 @@ mod tests {
             resolve_client_ip(peer, &headers, &sin),
             "127.0.0.1".parse::<IpAddr>().unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod admin_guard_tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_purga_contadores_sin_bloqueo_por_ttl() {
+        let g = AdminGuard::new();
+        g.record_failure("1.2.3.4", 5, 60);
+        assert_eq!(g.failure_count("1.2.3.4"), 1);
+        g.cleanup_with_ttl(Duration::ZERO);
+        assert_eq!(
+            g.failure_count("1.2.3.4"),
+            0,
+            "un contador sin bloqueo debe purgarse al superar el TTL"
+        );
+
+        // Un bloqueo activo NO se purga por TTL 0.
+        for _ in 0..5 {
+            g.record_failure("5.6.7.8", 5, 60);
+        }
+        g.cleanup_with_ttl(Duration::ZERO);
+        assert!(g.is_locked("5.6.7.8"), "el bloqueo activo debe mantenerse");
     }
 }

@@ -476,3 +476,28 @@ async fn apagado_por_senal_respeta_gracia_y_termina() {
     .expect("debe terminar dentro de la gracia");
     assert_eq!(outcome, socket_core::ShutdownOutcome::Completed);
 }
+
+#[tokio::test]
+async fn servidores_terminando_antes_de_senal_es_error() {
+    let bus = socket_core::control::ControlBus::new();
+    let outcome = socket_core::await_servers_with_grace(
+        async {},
+        std::future::pending::<()>(),
+        &bus,
+        None,
+        Duration::from_millis(200),
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        socket_core::ShutdownOutcome::ServersFinishedEarly,
+        "si los servidores mueren solos debe ser un fallo (no Completed)"
+    );
+    assert_eq!(
+        outcome.exit_code(),
+        1,
+        "el proceso debe salir con código != 0"
+    );
+    assert_eq!(socket_core::ShutdownOutcome::GraceExpired.exit_code(), 1);
+    assert_eq!(socket_core::ShutdownOutcome::Completed.exit_code(), 0);
+}

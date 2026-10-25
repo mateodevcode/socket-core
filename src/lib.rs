@@ -107,7 +107,7 @@ pub fn build_admin_router(state: AppState) -> Router {
 }
 
 /// Compat: router público (sin admin).
-pub fn build_router(state: AppState, _allowed_origins: &[String]) -> Router {
+pub fn build_router(state: AppState) -> Router {
     build_public_router(state)
 }
 
@@ -126,14 +126,7 @@ pub async fn serve(addr: SocketAddr) {
     spawn_cleanup_task(state.clone());
 
     let admin_addr: SocketAddr = cfg.admin_addr().parse().expect("ADMIN_PORT inválido");
-    serve_with_config(
-        addr,
-        admin_addr,
-        state,
-        &cfg.allowed_origins,
-        cfg.shutdown_grace_secs,
-    )
-    .await
+    serve_with_config(addr, admin_addr, state, cfg.shutdown_grace_secs).await
 }
 
 /// Limpieza periódica en segundo plano (no bloquea el arranque).
@@ -174,7 +167,7 @@ pub async fn init_state(cfg: &config::AppConfig) -> handlers::AppState {
     // Bootstrap dev: crea una key inicial y la escribe SOLO a un fichero 0600.
     // NUNCA se loguea la key en claro. FAIL-CLOSED: sin poder contar, no hay bootstrap.
     let empty = matches!(keys.count().await, Ok(0));
-    if cfg.allow_bootstrap && empty {
+    if cfg.allow_bootstrap && cfg.is_dev() && empty {
         match keys
             .create(
                 "bootstrap-dev".into(),
@@ -249,7 +242,7 @@ fn write_bootstrap_key(raw: &str) -> std::io::Result<String> {
 }
 
 /// Levanta el router público en 127.0.0.1:0 (tests de integración).
-pub async fn start_test_server(state: AppState, _allowed_origins: &[String]) -> SocketAddr {
+pub async fn start_test_server(state: AppState) -> SocketAddr {
     let app = build_public_router(state);
     start_router(app).await
 }
@@ -281,7 +274,6 @@ pub async fn serve_with_config(
     addr: SocketAddr,
     admin_addr: SocketAddr,
     state: AppState,
-    _allowed_origins: &[String],
     grace_secs: u64,
 ) {
     let public = build_public_router(state.clone());
@@ -323,12 +315,19 @@ pub async fn serve_with_config(
         std::time::Duration::from_secs(grace_secs),
     )
     .await;
-    if outcome == ShutdownOutcome::GraceExpired {
-        tracing::warn!(
-            "apagado: tiempo de gracia ({}s) agotado; terminando de todas formas",
-            grace_secs
-        );
-        std::process::exit(0);
+    match outcome {
+        ShutdownOutcome::Completed => {}
+        ShutdownOutcome::ServersFinishedEarly => {
+            tracing::error!("un listener terminó antes de la señal de apagado; saliendo con error");
+            std::process::exit(outcome.exit_code());
+        }
+        ShutdownOutcome::GraceExpired => {
+            tracing::warn!(
+                "apagado: tiempo de gracia ({}s) agotado; terminando de todas formas",
+                grace_secs
+            );
+            std::process::exit(outcome.exit_code());
+        }
     }
 }
 
@@ -336,6 +335,18 @@ pub async fn serve_with_config(
 pub enum ShutdownOutcome {
     Completed,
     GraceExpired,
+    /// Los servidores terminaron ANTES de recibir la señal (fallo inesperado).
+    ServersFinishedEarly,
+}
+
+impl ShutdownOutcome {
+    /// Código de salida del proceso para este desenlace.
+    pub fn exit_code(self) -> i32 {
+        match self {
+            ShutdownOutcome::Completed => 0,
+            ShutdownOutcome::GraceExpired | ShutdownOutcome::ServersFinishedEarly => 1,
+        }
+    }
 }
 
 /// Ejecuta los servidores hasta que llegue `signal`; entonces avisa por el bus y
@@ -354,7 +365,7 @@ where
 {
     tokio::pin!(servers);
     tokio::select! {
-        _ = &mut servers => return ShutdownOutcome::Completed,
+        _ = &mut servers => return ShutdownOutcome::ServersFinishedEarly,
         _ = signal => {}
     }
 

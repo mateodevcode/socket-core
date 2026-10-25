@@ -104,7 +104,7 @@ impl Hub {
             allowed_origins: vec![],
         };
 
-        let addr = socket_core::start_test_server(state.clone(), &[]).await;
+        let addr = socket_core::start_test_server(state.clone()).await;
         let admin_addr = socket_core::start_test_admin_server(state.clone()).await;
         let base = format!("http://{}", addr);
         let admin_base = format!("http://{}", admin_addr);
