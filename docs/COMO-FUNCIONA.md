@@ -350,9 +350,9 @@ Leídos de `src/limits.rs`, `src/config.rs`, `src/models.rs`, `src/handlers.rs`,
 | Publicaciones agregadas por proyecto | 500/s | `WS_PUBLISH_PER_PROJECT_PER_SEC` |
 | Ping / inactividad | 30 s / 120 s | `WS_PING_INTERVAL_SECS`, `WS_IDLE_TIMEOUT_SECS` |
 | Revalidación de credenciales del WS (watchdog) | 10 s | `Limits::auth_recheck_secs` |
-| Peticiones por IP (REST) | 600/min | `Limits::ip_rate_per_min` |
+| Peticiones por IP (REST) | 600/min | `IP_RATE_PER_MIN` (env, 1–100000) |
 | Rate limit por API key | `rate_limit_per_min` de la key (por defecto 120 al crearla) | campo de la key (`/admin/keys`) |
-| Rate extra de emisión por IP | 600/min | constante en `handlers::emit_event` |
+| Rate extra de emisión por IP | el mismo `IP_RATE_PER_MIN` | `state.limits.ip_rate_per_min` |
 | Fallos de MASTER_KEY antes de bloquear | 5 | `Limits::admin_fail_max` |
 | Duración del bloqueo admin | 60 s | `Limits::admin_lock_secs` |
 | Body HTTP máximo | 1 MB | `DefaultBodyLimit` en `build_public_router` |
@@ -382,12 +382,14 @@ imagen; si usas el hub embebido, puedes inyectar `AppState.limits` distinto.
   si muchos usuarios salen por la misma IP (NAT de oficina), ese es el cuello real
   antes que el límite de la key. La zona general (`ws_general`) es 20 r/s y `/ws`
   además limita a **10 conexiones simultáneas por IP**.
-- El hub añade su propio `ip_rate_per_min` (**600/min por IP**, todas las rutas con
-  key) y un cupo extra de emisión por IP (**600/min**). El límite de la key
-  (`rate_limit_per_min`, válido **1–100000**) es independiente y compartido.
+- El hub añade su propio `ip_rate_per_min` (**`IP_RATE_PER_MIN`, 600/min por
+  defecto**, todas las rutas con key; rango válido **1–100000**) y un cupo extra de
+  emisión por IP con el mismo valor. El límite de la key (`rate_limit_per_min`,
+  válido **1–100000**) es independiente y compartido.
 - **TRUSTED_PROXIES mal puesta**: si está vacía, se ignora `X-Forwarded-For` y el
-  hub ve la IP del gateway: todos los clientes comparten los 600/min de esa IP
-  (puede limitar de más) y no se puede banear por IP real. Si confías en un proxy
+  hub ve la IP del gateway: todos los clientes comparten el cupo
+  `IP_RATE_PER_MIN` de esa IP (puede limitar de más) y no se puede banear por IP
+  real. Si confías en un proxy
   que no lo es, un cliente puede **falsificar XFF** y repartir/evadir cupos. Por
   eso el arranque **rechaza** loopback y `0.0.0.0/0`/`::/0` en `TRUSTED_PROXIES`;
   configura solo el gateway de `central_network` (o la IP del contenedor Nginx).

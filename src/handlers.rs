@@ -249,7 +249,10 @@ pub async fn emit_event(
 
     // Rate extra por IP emisora (fase de red ajustará la confianza en XFF)
     let ip_bucket = format!("emit:{}", ip.0);
-    if !state.limiter.check(&ip_bucket, 600) {
+    if !state
+        .limiter
+        .check(&ip_bucket, state.limits.ip_rate_per_min)
+    {
         return err(StatusCode::TOO_MANY_REQUESTS, "rate limit por IP");
     }
 

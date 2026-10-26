@@ -4,9 +4,22 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 
 ## [Unreleased] — hardening (rama `security-hardening`)
 
+### Fase 8.10 — informe final, rate por IP configurable y rotación pendiente
+
+- **W1**: `docs/INFORME-FINAL.md` con la tabla completa de hallazgos
+  (4.1, 6 y 8.x), estado, evidencia y tests.
+- **W2**: `IP_RATE_PER_MIN` (1–100000, defecto 600) configurable por env; se
+  aplica al límite por IP de las peticiones con API key y al cupo de emisión
+  (antes 600 fijo). El arranque rechaza valores fuera de rango. Documentado el
+  efecto cuando los backends llaman directo por `central_network`/Docker.
+- **W3**: desglose de los 42 tests de Python por fichero y su job de CI.
+- **W4/R10**: alcance de `POST /admin/keys/:id/rotate` y
+  `alta_cliente.py --rotar` en `docs/PENDIENTE.md`; **no implementado** en esta
+  fase.
+
 ### Fase 8.9 — despliegue de rama, fetch seguro, smoke y estado sin dominio
 
-- **V1/R10**: §0.2 usa la imagen real de Compose (`docker compose config --images`,
+- **V1**: §0.2 usa la imagen real de Compose (`docker compose config --images`,
   p. ej. `socket-core-socket-core`) y `scripts/preflight.py --db ... --db-only`
   en vez de `sqlite3`. Probado sobre una DB sintética con esquema antiguo.
 - **V2/R11**: `deploy.sh` acepta `DEPLOY_REF` (rama o SHA) sin tocar `main`; si no

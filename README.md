@@ -69,6 +69,11 @@ docker network inspect central_network --format '{{range .IPAM.Config}}{{.Gatewa
 y ponlo en `TRUSTED_PROXIES`. Sin esa lista `X-Forwarded-For` se ignora (más
 seguro; el rate limit por IP usará el gateway). `scripts/estado.py` lo verifica.
 
+**IP_RATE_PER_MIN**: peticiones por minuto por IP antes de validar la key
+(1–100000, 600 por defecto). Aplica también al cupo de emisión. Si varios
+backends llaman directo por `central_network`, comparten la IP de su contenedor
+o la del gateway; ajústalo al agregado real.
+
 **Contenedor**: corre como UID 10001 con FS de solo lectura. El volumen `data/`
 debe ser escribible por ese UID (`sudo chown -R 10001:10001 data`); el entrypoint
 aborta con mensaje claro si no lo es. El `HEALTHCHECK` prueba `/health` en 3005 y 3015.

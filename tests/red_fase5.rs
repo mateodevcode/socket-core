@@ -31,6 +31,7 @@ fn jwt_ttl_fuera_de_rango_bloquea_arranque() {
         allow_bootstrap: false,
         trusted_proxies: vec![],
         shutdown_grace_secs: 10,
+        ip_rate_per_min: 600,
     };
     assert!(base(59).validate_secrets().is_err());
     assert!(base(3601).validate_secrets().is_err());
@@ -53,6 +54,7 @@ fn cors_produccion_exige_origenes() {
         allow_bootstrap: false,
         trusted_proxies: vec![],
         shutdown_grace_secs: 10,
+        ip_rate_per_min: 600,
     };
     assert!(base("prod", vec![]).validate_origins().is_err());
     assert!(base("prod", vec!["*".into()]).validate_origins().is_err());
@@ -109,6 +111,7 @@ fn bootstrap_escribe_fichero_0600_y_no_loguea_la_key() {
         allow_bootstrap: true,
         trusted_proxies: vec![],
         shutdown_grace_secs: 10,
+        ip_rate_per_min: 600,
     };
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _state = rt.block_on(socket_core::init_state(&cfg));

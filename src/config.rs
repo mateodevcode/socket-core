@@ -26,6 +26,8 @@ pub struct AppConfig {
     pub trusted_proxies: Vec<String>,
     /// Tiempo máximo total de apagado ordenado.
     pub shutdown_grace_secs: u64,
+    /// Peticiones por minuto por IP (antes de validar la API key).
+    pub ip_rate_per_min: i64,
 }
 
 impl AppConfig {
@@ -66,6 +68,9 @@ impl AppConfig {
         let shutdown_grace_secs: u64 = get("SHUTDOWN_GRACE_SECS")
             .and_then(|v| v.parse().ok())
             .unwrap_or(10);
+        let ip_rate_per_min: i64 = get("IP_RATE_PER_MIN")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(600);
 
         Self {
             host,
@@ -80,6 +85,7 @@ impl AppConfig {
             allow_bootstrap,
             trusted_proxies,
             shutdown_grace_secs,
+            ip_rate_per_min,
         }
     }
 
@@ -116,6 +122,9 @@ impl AppConfig {
                 "SHUTDOWN_GRACE_SECS debe estar entre 1 y 19 (stop_grace_period del contenedor es 20 s)"
                     .into(),
             );
+        }
+        if !(1..=100_000).contains(&self.ip_rate_per_min) {
+            return Err("IP_RATE_PER_MIN debe estar entre 1 y 100000".into());
         }
         if self.allow_bootstrap && !self.is_dev() {
             return Err("ALLOW_BOOTSTRAP=true solo está permitido con APP_ENV=dev".into());

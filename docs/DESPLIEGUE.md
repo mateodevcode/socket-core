@@ -29,8 +29,12 @@ TRUSTED_PROXIES=172.18.0.1
 # Gracia total de apagado ordenado
 SHUTDOWN_GRACE_SECS=10
 
+# Peticiones por minuto por IP (antes de validar la API key). Rango 1..100000.
+IP_RATE_PER_MIN=600
+
 # Deben cumplirse o el proceso NO arranca:
-#   JWT_SECRET != valor por defecto y >= 32 chars; MASTER_KEY >= 32; JWT_TTL_SECS en [60,3600]
+#   JWT_SECRET != valor por defecto y >= 32 chars; MASTER_KEY >= 32; JWT_TTL_SECS en [60,3600];
+#   IP_RATE_PER_MIN en [1,100000]
 JWT_SECRET=<openssl rand -hex 64>
 MASTER_KEY=<openssl rand -hex 32>
 JWT_TTL_SECS=600
@@ -350,6 +354,14 @@ Activación:
 3. `sudo systemctl reload nginx`.
 4. Verifica `curl -k -H 'Host: ws...' https://.../channels` => 404 y que el WS
    sigue funcionando. Si algo falla, restaura el backup de Nginx.
+
+**Rate limit por IP con backends directos.** `IP_RATE_PER_MIN` (1..100000, 600
+por defecto) cuenta por IP resuelta. Si un backend llama directo a
+`http://socket-core:3005` desde `central_network`, todas sus peticiones comparten
+la IP de su contenedor; si varios contenedores salen por el gateway, comparten la
+IP del gateway. Con Nginx delante y sin `TRUSTED_PROXIES`, todas las peticiones
+cuentan como la IP de Nginx. Ajusta el valor al agregado real: el límite por key
+(`rate_limit_per_min`) sigue siendo independiente y por proyecto.
 
 ## 5. fail2ban: alcance y recidive
 

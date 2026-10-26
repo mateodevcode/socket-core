@@ -18,6 +18,7 @@ fn cfg(jwt: &str, master: &str) -> AppConfig {
         allow_bootstrap: false,
         trusted_proxies: vec![],
         shutdown_grace_secs: 10,
+        ip_rate_per_min: 600,
     }
 }
 

@@ -80,6 +80,7 @@ async fn avisa_de_scopes_invalidos_y_prefijos_solapados_sin_secretos() {
         allow_bootstrap: false,
         trusted_proxies: vec![],
         shutdown_grace_secs: 10,
+        ip_rate_per_min: 600,
     };
     let _state = socket_core::init_state(&cfg).await;
 

@@ -222,7 +222,10 @@ pub async fn init_state(cfg: &config::AppConfig) -> handlers::AppState {
         limiter: middleware::RateLimiter::new(),
         control,
         registry: limits::ConnectionRegistry::new(),
-        limits: limits::Limits::default(),
+        limits: limits::Limits {
+            ip_rate_per_min: cfg.ip_rate_per_min,
+            ..limits::Limits::default()
+        },
         publish_limits: limits::ProjectPublishLimiters::new(),
         dev_mode: cfg.is_dev(),
         trusted_proxies: cfg.trusted_proxy_nets(),
