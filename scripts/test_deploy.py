@@ -20,6 +20,7 @@ FAKES = r"""#!/usr/bin/env bash
 # Funciones que simulan binarios externos (se cargan con BASH_ENV).
 git() {
   case "${1:-}" in
+    fetch) [ "${FAKE_FETCH_FAIL:-0}" = "1" ] && return 1; return 0 ;;
     rev-parse) cat "$FAKE_STATE/head" ;;
     reset)
       target="${3:-}"
@@ -228,11 +229,42 @@ class TestDeploy(unittest.TestCase):
         self.assertEqual(self.s.marker(), "A", "DB restaurada desde el backup")
         self.assertIn("Rollback sano", r.stdout + r.stderr)
 
+    def test_fetch_fallido_aborta_sin_tocar_nada(self):
+        # R12: el fetch es lo primero; si falla no se crea .last_good ni backup.
+        r = self.s.run({"FAKE_FETCH_FAIL": "1"})
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIsNone(self.s.last_good(), "no debe inicializar .last_good si falla el fetch")
+        self.assertEqual(self.s.head(), "A")
+        self.assertEqual(self.s.marker(), "A")
+        self.assertEqual(self.s.nginx_content(), "OLD")
+        self.assertEqual(list((self.s.root / "backups").glob("data-*.db")), [])
+
+    def test_primer_deploy_falla_salud_rollback_al_previo(self):
+        # No existe .last_good_commit: debe inicializarse con el HEAD previo (A)
+        # y, al fallar la salud del primer deploy (B), volver a A y restaurar datos.
+        self.assertIsNone(self.s.last_good())
+        self.s.set_origin("B")
+        r = self.s.run({"FAKE_HEALTH_FAIL": "1"})
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.s.head(), "A", "rollback al HEAD previo al fetch")
+        self.assertEqual(self.s.last_good(), "A", "inicializado con el commit previo")
+        self.assertEqual(self.s.marker(), "A", "DB restaurada aunque el fichero no existiera")
+        self.assertIn("inicializado con el commit previo", r.stdout)
+        self.assertIn("Rollback sano", r.stdout + r.stderr)
+
+    def test_deploy_ref_despliega_otra_rama_sin_main(self):
+        r = self.s.run({"DEPLOY_REF": "security-hardening"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Ref a desplegar: security-hardening", r.stdout)
+        self.assertEqual(self.s.last_good(), "A")
+
     def test_nginx_fallido_restaura_configuracion(self):
         r = self.s.run({"FAKE_NGINX_FAIL": "1"})
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.s.nginx_content(), "OLD", "debe restaurar el fichero previo")
-        self.assertIsNone(self.s.last_good(), "no se marca bueno si nginx falla")
+        # Primer despliegue: se inicializó con el HEAD previo (A), pero NO se
+        # marca como bueno el commit nuevo si nginx falla.
+        self.assertEqual(self.s.last_good(), "A", "no se marca bueno si nginx falla")
 
     def test_sin_copia_de_env_a_tmp_y_umask(self):
         texto = DEPLOY.read_text(encoding="utf-8")

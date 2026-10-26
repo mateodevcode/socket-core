@@ -9,6 +9,8 @@
 Uso:
     SOCKET_MASTER_KEY=... python3 scripts/preflight.py
     python3 scripts/preflight.py --db /tmp/copia.db --admin http://127.0.0.1:3015
+    # Sin admin ni MASTER_KEY: solo la copia SQLite (migración/preflight offline)
+    python3 scripts/preflight.py --db /tmp/copia.db --db-only
 
 Exit != 0 si hay problemas bloqueantes (scopes inválidos, prefijos solapados,
 keys expiradas, canales huérfanos). Los avisos (expiración muy lejana, sin DB)
@@ -143,6 +145,32 @@ def analizar(keys, canales, ahora=None):
     }
 
 
+def leer_keys_db(db_path):
+    """Keys desde una copia SQLite (sin admin/MASTER_KEY), para --db-only."""
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = con.execute(
+            "SELECT id, name, channel_prefix, scopes, expires_at, revoked FROM api_keys"
+        ).fetchall()
+    finally:
+        con.close()
+    keys = []
+    for r in rows:
+        prefixes = [x.strip() for x in str(r[2] or "").split(",") if x.strip()]
+        scopes = [x.strip() for x in str(r[3] or "").split(",") if x.strip()]
+        keys.append(
+            {
+                "id": r[0],
+                "name": r[1],
+                "channel_prefixes": prefixes,
+                "scopes": scopes,
+                "expires_at": r[4],
+                "revoked": bool(r[5]),
+            }
+        )
+    return keys
+
+
 def leer_canales(db_path):
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
@@ -213,21 +241,37 @@ def main():
     ap.add_argument("--master-key", default=os.environ.get("SOCKET_MASTER_KEY", ""))
     ap.add_argument("--db", default="", help="copia local de la SQLite (recomendado)")
     ap.add_argument(
+        "--db-only",
+        action="store_true",
+        help="lee keys y canales de --db (sin listener admin ni MASTER_KEY)",
+    )
+    ap.add_argument(
         "--trusted-proxies",
         default=os.environ.get("TRUSTED_PROXIES", ""),
         help="valor de TRUSTED_PROXIES (por defecto, el del entorno)",
     )
     args = ap.parse_args()
 
-    if not args.master_key:
+    if args.db_only and not args.db:
+        print("[ERROR] --db-only requiere --db (copia SQLite).")
+        return 2
+    if not args.db_only and not args.master_key:
         print("[ERROR] Falta SOCKET_MASTER_KEY (o --master-key).")
         return 2
 
-    try:
-        keys, via = obtener_keys(args, args.master_key)
-    except Exception as e:
-        print(f"[ERROR] No se pudo leer /admin/keys: {e}")
-        return 2
+    if args.db_only:
+        try:
+            keys = leer_keys_db(args.db)
+        except Exception as e:
+            print(f"[ERROR] No se pudieron leer keys de {args.db}: {e}")
+            return 2
+        via = "db-only"
+    else:
+        try:
+            keys, via = obtener_keys(args, args.master_key)
+        except Exception as e:
+            print(f"[ERROR] No se pudo leer /admin/keys: {e}")
+            return 2
     print(f"Keys leídas: {len(keys)} (vía {via})")
 
     db = copiar_db(args)

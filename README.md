@@ -408,7 +408,7 @@ curl -X POST https://hub.ejemplo.com/channels/tuproyecto:chat/events \
 - **Backups:** el deploy guarda `backups/data-<fecha>.tgz` antes de reconstruir
   (retención 10) y el commit previo en `.last_good_commit`. Ver
   [`docs/DESPLIEGUE.md`](docs/DESPLIEGUE.md).
-- **Monitoreo:** `SOCKET_MASTER_KEY=... python3 scripts/estado.py` — contenedor,
+- **Monitoreo:** `SOCKET_PUBLIC_URL=https://tu-dominio SOCKET_MASTER_KEY=... python3 scripts/estado.py` — contenedor,
   salud, `/admin/stats` por proyecto, Nginx, certificado, fail2ban y coherencia de
   `TRUSTED_PROXIES`. No requiere ninguna API key con prefijo `*`.
 - **Admin:** solo por el listener loopback (`docker exec`), nunca por el dominio

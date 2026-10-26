@@ -93,6 +93,27 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class TestDbOnly(unittest.TestCase):
+    def test_lee_keys_de_esquema_real(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as d:
+            db = Path(d) / "hub.db"
+            con = sqlite3.connect(db)
+            con.execute(
+                "CREATE TABLE api_keys (id TEXT, name TEXT, channel_prefix TEXT, "
+                "scopes TEXT, expires_at INTEGER, revoked INTEGER)"
+            )
+            con.execute(
+                "INSERT INTO api_keys VALUES ('k1','demo','demo:*','publish,subscribe',NULL,0)"
+            )
+            con.commit()
+            con.close()
+            keys = pf.leer_keys_db(str(db))
+            self.assertEqual(len(keys), 1)
+            self.assertEqual(keys[0]["channel_prefixes"], ["demo:*"])
+            self.assertEqual(keys[0]["scopes"], ["publish", "subscribe"])
+
+
 class TestTrustedProxies(unittest.TestCase):
     def test_vacio_avisa(self):
         p = pf.trusted_proxies_problemas("", ["172.18.0.1"])

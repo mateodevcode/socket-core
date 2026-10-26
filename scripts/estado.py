@@ -10,13 +10,15 @@ La MASTER_KEY NUNCA va en argv de procesos: para docker exec se pasa a curl por
 stdin (`-K -`). Solo se acepta SOCKET_MASTER_KEY o --master-key.
 
 Uso en el VPS:
-    SOCKET_MASTER_KEY=... python3 scripts/estado.py
+    SOCKET_PUBLIC_URL=https://hub.example SOCKET_MASTER_KEY=... python3 scripts/estado.py
     # opcional: --admin http://127.0.0.1:3015 --master-key ...
     # si el admin no es alcanzable desde el host, se intenta vía
     #   docker exec socket-core curl ... (cabecera por stdin)
 
 Uso parcial (solo core público, sirve desde tu PC):
     python3 scripts/estado.py --solo-core --core https://tu-dominio.example
+
+No hay dominio por defecto: usa --core o SOCKET_PUBLIC_URL.
 
 Solo librería estándar.
 """
@@ -39,6 +41,11 @@ RESET = "\033[0m" if sys.stdout.isatty() else ""
 def pintar(ok: bool, nombre: str, detalle: str = "") -> bool:
     print(f"[{'OK' if ok else 'FALLO'}] {nombre}" + (f" -> {detalle}" if detalle else ""))
     return ok
+
+
+def default_core() -> str:
+    """Sin dominio fijo: SOCKET_PUBLIC_URL o --core obligatorio."""
+    return os.environ.get("SOCKET_PUBLIC_URL", "").strip()
 
 
 def leer_master(args) -> str:
@@ -189,11 +196,14 @@ def check_trusted_proxies() -> bool:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Estado del hub socket-core")
-    ap.add_argument("--core", default="https://ws.seventwo.tech")
+    ap.add_argument("--core", default=default_core())
     ap.add_argument("--admin", default="http://127.0.0.1:3015")
     ap.add_argument("--master-key", default="")
     ap.add_argument("--solo-core", action="store_true", help="solo chequeos del core (sin docker/nginx/fail2ban)")
     args = ap.parse_args()
+
+    if not args.core:
+        ap.error("define SOCKET_PUBLIC_URL o pasa --core (no hay dominio por defecto)")
 
     master = leer_master(args)
     alertas = []

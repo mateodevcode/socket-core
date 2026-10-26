@@ -54,29 +54,70 @@ canales cuyo nombre no encaja con el prefijo de ninguna key quedan **huérfanos*
 > **SINTÉTICA** (el repositorio no contiene `data/socket-core.db`). Los canales
 > `demo:chat`/`orphan:x` de la salida de ejemplo son de laboratorio, no datos reales.
 
-Comandos EXACTOS para probar sobre una copia de TU DB real:
+Comandos EXACTOS para probar sobre una copia de TU DB real. **No uses
+`socket-core:latest`**: la imagen la construye Compose con el nombre
+`<proyecto>-<servicio>` (aquí `socket-core-socket-core`). Obtén el nombre real:
 
 ```bash
 cd /srv/infra/socket-core
+IMG="$(docker compose config --images | head -1)"
+echo "imagen que usa compose: $IMG"
+# alternativa tras un build/up: docker compose images socket-core --format '{{.Repository}}:{{.Tag}}'
+```
+
+Procedimiento completo (copia + migración + informe con Python del repo):
+
+```bash
+cd /srv/infra/socket-core
+IMG="$(docker compose config --images | head -1)"
 mkdir -p /tmp/migcheck
 sudo cp data/socket-core.db /tmp/migcheck/hub.db
 sudo chown -R 10001:10001 /tmp/migcheck   # el contenedor corre como UID 10001
 
-docker run -d --name sc-mig-check   -v /tmp/migcheck:/app/data   -e APP_ENV=dev -e PORT=3005 -e ADMIN_PORT=3015   -e JWT_SECRET="$(openssl rand -hex 64)" -e MASTER_KEY="$(openssl rand -hex 32)"   -e DATABASE_URL="sqlite:/app/data/hub.db?mode=rwc" -e ALLOW_BOOTSTRAP=false   socket-core:latest
+docker run -d --name sc-mig-check -v /tmp/migcheck:/app/data   -e APP_ENV=dev -e PORT=3005 -e ADMIN_PORT=3015   -e JWT_SECRET="$(openssl rand -hex 64)" -e MASTER_KEY="$(openssl rand -hex 32)"   -e DATABASE_URL="sqlite:/app/data/hub.db?mode=rwc" -e ALLOW_BOOTSTRAP=false   "$IMG"
 sleep 5
 docker logs sc-mig-check 2>&1 | tail -8    # ver "Migración de canales: N ..."
 docker stop sc-mig-check && docker rm sc-mig-check
 
-sqlite3 /tmp/migcheck/hub.db "SELECT COUNT(*) FROM channels WHERE project_id='';"
-sqlite3 /tmp/migcheck/hub.db "SELECT name FROM channels WHERE project_id='';"
+# Equivalente a sqlite3, pero con el Python del repo: lee keys y canales de la
+# copia y calcula huérfanos/cascada SIN admin ni MASTER_KEY.
+python3 scripts/preflight.py --db /tmp/migcheck/hub.db --db-only
 ```
 
-Salida de la prueba **sintética** de este repo:
+Salida real de este repo sobre una DB **sintética** con esquema antiguo
+(`channels` sin `project_id`, una key `demo:*` y los canales `demo:chat` y
+`orphan:x`). El daemon Docker no estaba disponible en el entorno de la prueba,
+así que se ejecutó el **mismo binario** que empaqueta la imagen; el nombre de
+imagen anterior sí se obtuvo con `docker compose config --images`
+(`socket-core-socket-core`):
 
 ```text
-canales: [('demo:chat', 'legacy-key'), ('orphan:x', '')]
+INFO socket_core::db: Migración de canales: 2 repartidos por prefijo
+INFO socket_core::db: SQLite listo (1 keys registradas)
+INFO socket_core::channel_manager: Canales restaurados desde SQLite: 2
+
+columnas channels: ['id', 'name', 'description', 'created_at', 'project_id']
+canales: [('demo:chat', 'k-demo'), ('orphan:x', '')]
 huérfanos (project_id=''): 1
+
+$ python3 scripts/preflight.py --db /tmp/migcheck/hub.db --db-only
+Keys leídas: 1 (vía db-only)
+Canales leídos de copia SQLite: 2 (/tmp/migcheck/hub.db)
+
+-- canales por proyecto --
+  legacy                         canales=1
+
+-- si borras cada key, canales en cascada --
+  legacy                         se borrarían=1
+
+[BLOQUEANTE] 2:
+  - canales huérfanos (invisibles): ['orphan:x']
+  - TRUSTED_PROXIES vacío: se ignorará X-Forwarded-For
+exit 1
 ```
+
+`--db-only` no necesita MASTER_KEY: lee `api_keys` de la copia. Si prefieres el
+listener admin, usa `SOCKET_MASTER_KEY=... python3 scripts/preflight.py --db ...`.
 
 Si hay huérfanos esperados, decide antes de desplegar: renombrar el canal, ajustar
 el prefijo de una key, o aceptar que queden inaccesibles. NO borres filas a mano
@@ -90,8 +131,8 @@ SET project_id = (SELECT id FROM api_keys WHERE name = 'proyecto-demo')
 WHERE project_id = '' AND name = 'canal-huerfano';
 ```
 
-Verifica en la copia con `sqlite3 /tmp/migcheck/hub.db "SELECT COUNT(*) FROM channels WHERE project_id='';"`
-(o con python3 si no tienes sqlite3). Después, en el deploy real (con backup hecho):
+Verifica en la copia con `python3 scripts/preflight.py --db /tmp/migcheck/hub.db --db-only`
+(no necesitas `sqlite3`). Después, en el deploy real (con backup hecho):
 aplica el UPDATE sobre `data/socket-core.db` con el servicio parado,
 `sudo chown -R 10001:10001 data`, y arranca.
 
@@ -132,11 +173,32 @@ Resumen (detalle y migración en `CHANGELOG.md`):
 
 ## 1. Despliegue
 
-> **Primer despliegue de esta rama (manual):** no fusiones a `main` todavía.
-> Despliega la rama a mano con `docker compose logs -f socket-core` abierto en otra
-> terminal para ver el arranque y cualquier fallo; verifica `/health`, `estado.py` y
-> un mensaje de prueba. Solo después fusiona a `main` para que el workflow automático
-> tome el relevo.
+### 1.0 Primer despliegue de la RAMA (sin tocar `main`)
+
+No fusiones a `main` todavía. Orden exacto:
+
+1. En tu equipo, sube la rama y espera a que CI esté **verde**:
+   ```bash
+   git push -u origin security-hardening
+   gh run watch   # o espera el check en GitHub Actions
+   ```
+2. En el VPS, trae **solo** la rama y ejecuta el script versionado de esa rama con
+   `DEPLOY_REF` (no modifica `main`, ni local ni remoto):
+   ```bash
+   cd /srv/infra/socket-core
+   git fetch origin security-hardening
+   git show origin/security-hardening:scripts/deploy.sh | DEPLOY_REF=security-hardening bash -s
+   ```
+   Si no existe `.last_good_commit`, el script lo inicializa con el **HEAD previo**
+   (normalmente `main`) antes de resetear el árbol. Así, si este primer intento
+   falla en salud, el rollback vuelve a `main` y restaura la DB.
+3. Comprueba `/health`, `SOCKET_PUBLIC_URL=... python3 scripts/estado.py` y
+   `SOCKET_PUBLIC_URL=... SOCKET_MASTER_KEY=... python3 scripts/smoke.py`.
+4. Solo si todo va bien, fusiona la rama a `main` para que el workflow automático
+   (que ejecuta `origin/main:scripts/deploy.sh`) tome el relevo.
+
+El despliegue automático de `main` (push → CI `quality`/`sdk`/`python`/`docker`/
+`nginx`/`fail2ban` → job `deploy` con entorno `production`) no cambia.
 
 El despliegue es automático: push a `main` → workflow **CI** (`quality`) → si pasa,
 job **deploy** (needs de quality/sdk/python/docker/nginx/fail2ban) exige el entorno
@@ -190,37 +252,58 @@ Notas del contenedor: `read_only: true`, `cap_drop: ALL`, `no-new-privileges`,
 ## 2. Verificación posterior
 
 ```bash
+cd /srv/infra/socket-core
+
 # 1) Salud de ambos listeners dentro del contenedor
 docker exec socket-core curl -fsS http://127.0.0.1:3005/health
 docker exec socket-core curl -fsS http://127.0.0.1:3015/health
 
 # 2) Estado completo (contenedor, stats por proyecto, Nginx, cert, fail2ban, TRUSTED_PROXIES)
-SOCKET_MASTER_KEY=$(grep ^MASTER_KEY= .env | cut -d= -f2) python3 scripts/estado.py
+#    Sin dominio por defecto: SOCKET_PUBLIC_URL (o --core) es obligatorio.
+SOCKET_PUBLIC_URL=https://ws.seventwo.tech SOCKET_MASTER_KEY=$(grep ^MASTER_KEY= .env | cut -d= -f2) python3 scripts/estado.py
 
-# 3) Prueba de mensaje real con una key de pruebas (backend -> hub)
-MASTER=$(grep ^MASTER_KEY= .env | cut -d= -f2)
-dc() { docker exec -i socket-core curl -sS "$@"; }
-dc -X POST http://127.0.0.1:3015/admin/keys -H "X-Master-Key: $MASTER" \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"smoke-test","channel_prefix":"smoke:*","domains":["https://smoke.example"],"scopes":["publish","subscribe","manage"]}'
-# guarda la api_key de la respuesta (solo se muestra una vez) y:
-docker exec -i socket-core curl -sS -X POST http://127.0.0.1:3005/channels \
-  -H "X-Api-Key: <API_KEY>" -H 'Content-Type: application/json' -d '{"name":"smoke:chat"}'
-docker exec -i socket-core curl -sS -X POST http://127.0.0.1:3005/channels/smoke:chat/events \
-  -H "X-Api-Key: <API_KEY>" -H 'Content-Type: application/json' \
-  -d '{"source":"smoke","targets":["*"],"payload":{"type":"ping"}}'
-# 4) Limpieza: revocar y borrar la key de pruebas
-dc -X POST http://127.0.0.1:3015/admin/keys/<KEY_ID>/revoke -H "X-Master-Key: $MASTER"
-dc -X DELETE http://127.0.0.1:3015/admin/keys/<KEY_ID> -H "X-Master-Key: $MASTER"
+# 3) Prueba de humo post-despliegue: crea key temporal, canal, emite,
+#    comprueba y borra la key en un finally (también si algo falla).
+SOCKET_PUBLIC_URL=https://ws.seventwo.tech SOCKET_MASTER_KEY=$(grep ^MASTER_KEY= .env | cut -d= -f2) python3 scripts/smoke.py
 ```
 
+`smoke.py` no imprime ni acepta secretos por argv: la MASTER_KEY va por entorno
+y todas las cabeceras/API key viajan en la configuración de `curl -K -` por
+**stdin**. Usa `docker exec` para el listener admin (loopback) y la URL pública
+para canal/evento/lectura. Si falla, intenta borrar la key temporal igualmente
+(cascada de sus canales) y sale con código != 0.
+
 Salud esperada: `{"service":"socket-core","status":"ok"}` en ambos puertos y
-`{"success":true,...}` al emitir.
+`[OK] smoke: key + canal + evento + lectura` al final.
 
 ## 3. Rollback
 
 El deploy guarda el commit anterior en `.last_good_commit` y backups fechados en
-`backups/`.
+`backups/`. En el **primer** despliegue el fichero no existe: `deploy.sh` lo
+inicializa con el HEAD previo al `git fetch` (normalmente `main`). Si ese primer
+intento falla en salud, el rollback vuelve a ese commit y restaura la DB, aunque
+el fichero no existiera antes. El valor solo se **actualiza** tras salud +
+chequeo público.
+
+**Qué compose/Dockerfile usa el rollback:** los del commit viejo. `git reset
+--hard "$LAST_GOOD"` deja en el árbol el `docker-compose.yml` y el `Dockerfile`
+antiguos, y `docker compose build` reconstruye con ellos. Por eso el rollback
+puede volver a una versión que corría como **root** y que **no tenía** el
+listener admin (3015): el script exige solo el puerto público en la
+reverificación del rollback (`wait_health_rollback`), no el 3015. Tras volver a
+una versión antigua, el volumen `data/` puede quedar escrito por root; al
+redesplegar la versión nueva hay que repetir `sudo chown -R 10001:10001 data`.
+
+Simulación reproducible de ese caso (sin Docker real):
+
+```bash
+python -m unittest scripts.test_deploy.TestDeploy.test_primer_deploy_falla_salud_rollback_al_previo -v
+python -m unittest scripts.test_deploy.TestDeploy.test_fetch_fallido_aborta_sin_tocar_nada -v
+```
+
+El primero arranca sin `.last_good_commit`, publica un commit nuevo cuyo health
+falla, y comprueba que vuelve al HEAD previo, que `.last_good_commit` queda con
+ese HEAD y que la DB recupera el marcador anterior.
 
 ```bash
 cd /srv/infra/socket-core
@@ -287,10 +370,40 @@ Ver **§10** y `docs/sudoers-deploy.example`. No se aplica automáticamente.
 
 Hoy `ci.yml` hace, por SSH: `git show origin/main:scripts/deploy.sh | bash -s`, es
 decir, **siempre el script de origin/main** (aunque el working tree esté viejo).
+Para una rama, el runbook de §1.0 usa `DEPLOY_REF=<rama>` (el script hace
+`git fetch origin "$DEPLOY_REF"` y `git reset --hard origin/$DEPLOY_REF`).
 Además, `deploy.sh` compara el script de origin con el que se está ejecutando y, si
 difieren, se **re-ejecuta** desde la versión nueva (protege ejecuciones manuales de
 una copia vieja). El commit sano se guarda en `.last_good_commit` **solo** tras
 salud + chequeo público.
+
+### 7.1 Remoto SSH y deploy key de solo lectura (R12)
+
+El remoto actual es HTTPS; para que `git fetch` use una **deploy key de solo
+lectura** (sin credenciales de usuario ni token en el remoto):
+
+```bash
+# En el VPS, como usuario del deploy y con una clave dedicada:
+ssh-keygen -t ed25519 -C "socket-core-deploy-readonly" -f ~/.ssh/socket-core-deploy -N ''
+cat ~/.ssh/socket-core-deploy.pub
+# GitHub -> repo -> Settings -> Deploy keys -> Add deploy key
+#   Title: socket-core-readonly   Key: (pega la .pub)   NO marcar "Allow write access"
+```
+
+Configura el remoto y compruébalo:
+
+```bash
+cd /srv/infra/socket-core
+git remote set-url origin git@github.com:mateodevcode/socket-core.git
+GIT_SSH_COMMAND='ssh -i ~/.ssh/socket-core-deploy -o IdentitiesOnly=yes' git fetch origin main
+ssh -i ~/.ssh/socket-core-deploy -o IdentitiesOnly=yes -T git@github.com
+# esperado: "Hi ...! You've successfully authenticated, but GitHub does not provide shell access."
+```
+
+La deploy key **no** puede escribir: `deploy.sh` solo hace `fetch`, `show` y
+`reset`; nunca `push`. La clave SSH del CI (`VPS_SSH_KEY`) es otra cosa: sirve
+para entrar al VPS, no para GitHub. Si rotas la deploy key, actualiza
+`~/.ssh/config`/`GIT_SSH_COMMAND` y prueba el fetch antes de desplegar.
 
 
 ## 8. Programar estado.py (cron/systemd) sin filtrar MASTER_KEY
@@ -306,7 +419,37 @@ sudo chown root:root /etc/socket-core/estado.env
 sudo chmod 600 /etc/socket-core/estado.env
 ```
 
-Cron:
+**Cron solo escribe en un log; no envía alertas.** Si el proceso falla o
+`estado.py` sale != 0, nadie se entera salvo que revises el fichero. Para un
+aviso real, usa un wrapper root-owned que lea los secretos de un fichero 0600 y
+llame a `mail`/`msmtp`/`curl` **sin poner secretos en la línea de comandos**:
+
+```bash
+# /usr/local/sbin/socketcore-estado-cron  (root:root 0700)
+#!/bin/sh
+set -eu
+set -a; . /etc/socket-core/estado.env; set +a
+if ! /usr/bin/python3 /srv/infra/socket-core/scripts/estado.py >> /var/log/socketcore-estado.log 2>&1; then
+  # La URL/token del webhook viven en webhook.curl (0600), nunca en argv.
+  echo "socket-core: estado.py fallo ($(date -Is))" |
+    curl -sS -K /etc/socket-core/webhook.curl --data-binary @- >/dev/null || true
+fi
+```
+
+```cron
+0 * * * * root /usr/local/sbin/socketcore-estado-cron
+```
+
+`/etc/socket-core/webhook.curl` (root 0600):
+```text
+url = "https://hooks.example/xxxx"
+header = "Authorization: Bearer <token>"
+```
+Para correo, `msmtp` lee su configuración de `/etc/msmtprc` (0600) y el wrapper
+hace `... | msmtp -t`; no pases contraseñas por argumentos. En systemd puedes
+usar `OnFailure=socketcore-aviso.service` en el timer/servicio en vez del `if`.
+
+Cron directo (sin aviso, solo log):
 ```cron
 0 * * * * root set -a; . /etc/socket-core/estado.env; set +a; python3 /srv/infra/socket-core/scripts/estado.py >> /var/log/socketcore-estado.log 2>&1
 ```

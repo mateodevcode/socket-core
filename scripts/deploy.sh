@@ -6,7 +6,8 @@ set -euo pipefail
 umask 077
 
 ROOT="${DEPLOY_ROOT:-/srv/infra/socket-core}"
-BRANCH="${DEPLOY_BRANCH:-main}"
+# DEPLOY_REF permite desplegar una rama o SHA concreto sin tocar main.
+REF="${DEPLOY_REF:-${DEPLOY_BRANCH:-main}}"
 SUDO="${SUDO-sudo}"
 BACKUP_DIR="${BACKUP_DIR:-$ROOT/backups}"
 DB_FILE="${DB_FILE:-$ROOT/data/socket-core.db}"
@@ -24,19 +25,31 @@ log() { echo "→ $*"; }
 fail() { echo "❌ $*" >&2; exit 1; }
 
 cd "$ROOT"
-mkdir -p "$BACKUP_DIR"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 PREV="$(git rev-parse HEAD)"
 log "Commit previo: $PREV"
+log "Ref a desplegar: $REF"
 
-# Trae origin y, si el script de origin difiere del que se está ejecutando,
-# re-ejecuta el nuevo (protege invocaciones manuales de una versión vieja).
-git fetch origin "$BRANCH"
+# R12: el fetch es SIEMPRE lo primero que puede fallar. Si falla, no se toca ni
+# .last_good_commit, ni backups, ni el working tree, ni el contenedor.
+git fetch origin "$REF" || fail "git fetch origin $REF falló; no se ha modificado nada"
+
+# Primer despliegue: no existe .last_good_commit. Se inicializa con el HEAD
+# ANTERIOR al fetch para que, si este primer intento falla en salud, el rollback
+# tenga a dónde volver. El valor es el PREV leído antes del fetch.
+if [ ! -f .last_good_commit ]; then
+  echo "$PREV" > .last_good_commit
+  log "Sin .last_good_commit: inicializado con el commit previo $PREV"
+fi
+
+mkdir -p "$BACKUP_DIR"
+# Si el script de origin difiere del que se está ejecutando, re-ejecuta el nuevo
+# (protege invocaciones manuales de una versión vieja).
 NUEVO="$BACKUP_DIR/deploy-origin-$STAMP.sh"
-git show "origin/$BRANCH:scripts/deploy.sh" > "$NUEVO" \
-  || fail "no se pudo obtener scripts/deploy.sh de origin/$BRANCH"
+git show "origin/$REF:scripts/deploy.sh" > "$NUEVO" \
+  || fail "no se pudo obtener scripts/deploy.sh de origin/$REF"
 chmod 700 "$NUEVO"
-if [ "${DEPLOY_REEXEC:-0}" != "1" ] && ! cmp -s "$NUEVO" "${BASH_SOURCE[0]}"; then
+if [ "${DEPLOY_REEXEC:-0}" != "1" ] && ! cmp -s "$NUEVO" "${BASH_SOURCE[0]:-}"; then
   log "El script de origin difiere del actual; re-ejecutando el nuevo"
   DEPLOY_REEXEC=1 exec bash "$NUEVO"
 fi
@@ -47,7 +60,7 @@ if [ -f "$DB_FILE" ]; then
   HELPER="scripts/sqlite_backup.py"
   if [ ! -f "$HELPER" ]; then
     HELPER="$BACKUP_DIR/sqlite_backup.py"
-    git show "origin/$BRANCH:scripts/sqlite_backup.py" > "$HELPER" \
+    git show "origin/$REF:scripts/sqlite_backup.py" > "$HELPER" \
       || fail "no se pudo obtener scripts/sqlite_backup.py"
   fi
   log "Backup consistente de SQLite: data-$STAMP.db"
@@ -63,8 +76,8 @@ fi
 git reset --hard HEAD >/dev/null 2>&1 || true
 git clean -fd -e proyectos/ -e .env -e data/ -e backups/ -e .last_good_commit >/dev/null 2>&1 || true
 $SUDO chown -R 10001:10001 data 2>/dev/null || true
-log "Actualizando a origin/$BRANCH"
-git reset --hard "origin/$BRANCH"
+log "Actualizando a origin/$REF"
+git reset --hard "origin/$REF"
 
 [ -f .env ] || fail "Falta .env en $ROOT (cópialo una vez, no se versiona)"
 
@@ -79,10 +92,24 @@ salud_ok() {
   curl -fsS --max-time 3 http://127.0.0.1:3005/health >/dev/null 2>&1 \
     && docker exec socket-core curl -fsS --max-time 3 http://127.0.0.1:3015/health >/dev/null 2>&1
 }
+salud_publica_ok() {
+  curl -fsS --max-time 3 http://127.0.0.1:3005/health >/dev/null 2>&1
+}
 wait_health() {
   local i
   for ((i = 0; i < MAX_HEALTH_ATTEMPTS; i++)); do
     if salud_ok; then return 0; fi
+    sleep "$HEALTH_SLEEP"
+  done
+  return 1
+}
+# El rollback vuelve a un commit antiguo cuyo Dockerfile/compose puede no tener
+# listener admin (3015) ni usuario no-root. Por eso solo se exige el puerto
+# público; exigir 3015 haría fallar un rollback correcto a versiones antiguas.
+wait_health_rollback() {
+  local i
+  for ((i = 0; i < MAX_HEALTH_ATTEMPTS; i++)); do
+    if salud_publica_ok; then return 0; fi
     sleep "$HEALTH_SLEEP"
   done
   return 1
@@ -113,7 +140,7 @@ if ! wait_health; then
     restore_db
     docker compose build socket-core || true
     docker compose up -d --remove-orphans || true
-    if wait_health; then
+    if wait_health_rollback; then
       log "Rollback sano en $LAST_GOOD"
     else
       echo "❌ El rollback tampoco quedó sano; intervención manual" >&2

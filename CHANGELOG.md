@@ -4,6 +4,25 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 
 ## [Unreleased] — hardening (rama `security-hardening`)
 
+### Fase 8.9 — despliegue de rama, fetch seguro, smoke y estado sin dominio
+
+- **V1/R10**: §0.2 usa la imagen real de Compose (`docker compose config --images`,
+  p. ej. `socket-core-socket-core`) y `scripts/preflight.py --db ... --db-only`
+  en vez de `sqlite3`. Probado sobre una DB sintética con esquema antiguo.
+- **V2/R11**: `deploy.sh` acepta `DEPLOY_REF` (rama o SHA) sin tocar `main`; si no
+  existe `.last_good_commit` lo inicializa con el HEAD previo al fetch; el rollback
+  reverifica solo el puerto público (las versiones viejas pueden no tener 3015) y
+  se simula sin Docker en `scripts/test_deploy.py`.
+- **V3/R12**: `git fetch origin "$DEPLOY_REF"` es la primera acción con efecto y
+  aborta sin modificar nada si falla. Documentadas deploy key de solo lectura y
+  remoto SSH.
+- **V4**: `scripts/smoke.py` (key temporal, canal, evento, lectura y borrado en
+  `finally`) con credenciales solo por `curl -K -` (stdin); sustituye §2.3/§2.4.
+- **V5**: `estado.py` sin dominio por defecto (`SOCKET_PUBLIC_URL` o `--core`).
+  Documentado que cron solo loguea y cómo añadir aviso mail/webhook sin secretos
+  en argv.
+
+
 ## Guía de migración rápida (fases 2 → 7)
 
 Resumen de TODO lo incompatible y qué hacer en cada caso. El detalle está en la
