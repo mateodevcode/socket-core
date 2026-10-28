@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
 """Estado completo del hub socket-core.
 
-Muestra: contenedor, salud, stats, canales con conectados, borde Nginx
-(certificado), fail2ban y un veredicto final. Exit 0 = todo bien, 1 = alertas.
+Muestra: contenedor, salud, estadísticas globales por proyecto (admin), borde
+Nginx (certificado), fail2ban y un veredicto final. Exit 0 = todo bien, 1 = alertas.
+
+Las estadísticas salen de GET /admin/stats del listener ADMIN (loopback), con
+MASTER_KEY. Ya NO hace falta una API key con prefijo "*".
+La MASTER_KEY NUNCA va en argv de procesos: para docker exec se pasa a curl por
+stdin (`-K -`). Solo se acepta SOCKET_MASTER_KEY o --master-key.
 
 Uso en el VPS:
-    python3 scripts/estado.py
-    # necesita una key ops: SOCKET_OPS_KEY, --key, o archivo .ops_key
-    # crearla una vez: ver README § "monitoreo" o scripts/alta_cliente.py (nombre ops-monitoreo)
+    SOCKET_PUBLIC_URL=https://hub.example SOCKET_MASTER_KEY=... python3 scripts/estado.py
+    # opcional: --admin http://127.0.0.1:3015 --master-key ...
+    # si el admin no es alcanzable desde el host, se intenta vía
+    #   docker exec socket-core curl ... (cabecera por stdin)
 
 Uso parcial (solo core público, sirve desde tu PC):
-    SOCKET_OPS_KEY=sc_live_... python3 scripts/estado.py --solo-core --core https://ws.seventwo.tech
+    python3 scripts/estado.py --solo-core --core https://tu-dominio.example
+
+No hay dominio por defecto: usa --core o SOCKET_PUBLIC_URL.
 
 Solo librería estándar.
 """
 
 import argparse
 import datetime
+import ipaddress
 import json
 import os
 import ssl
@@ -34,22 +43,20 @@ def pintar(ok: bool, nombre: str, detalle: str = "") -> bool:
     return ok
 
 
-def leer_key(args) -> str:
-    if args.key:
-        return args.key
-    if os.environ.get("SOCKET_OPS_KEY"):
-        return os.environ["SOCKET_OPS_KEY"]
-    for c in (".ops_key", "../.ops_key", "/srv/infra/socket-core/.ops_key"):
-        if os.path.isfile(c):
-            with open(c, encoding="utf-8") as f:
-                v = f.read().strip()
-                if v:
-                    return v
-    return ""
+def default_core() -> str:
+    """Sin dominio fijo: SOCKET_PUBLIC_URL o --core obligatorio."""
+    return os.environ.get("SOCKET_PUBLIC_URL", "").strip()
 
 
-def get_json(url: str, key: str = "", timeout=10):
-    req = urllib.request.Request(url, headers={"X-Api-Key": key} if key else {})
+def leer_master(args) -> str:
+    """Solo --master-key o SOCKET_MASTER_KEY. Nunca ficheros sueltos en el repo."""
+    if args.master_key:
+        return args.master_key
+    return os.environ.get("SOCKET_MASTER_KEY", "")
+
+
+def get_json(url: str, headers: dict = None, timeout=10):
+    req = urllib.request.Request(url, headers=headers or {})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, json.loads(r.read().decode())
@@ -62,26 +69,147 @@ def get_json(url: str, key: str = "", timeout=10):
         return 0, {"_error": str(e)}
 
 
+def _curl_cfg(value: str) -> str:
+    """Escapa un valor para la configuración de curl (-K)."""
+    out = value.replace("\\", "\\\\").replace('"', '\\"')
+    out = out.replace("\n", "\\n").replace("\r", "\\r")
+    return '"' + out + '"'
+
+
+def docker_curl_json(
+    master: str,
+    port: str,
+    path: str,
+    method: str = "GET",
+    payload: str = "",
+    timeout: int = 10,
+):
+    """Curl dentro del contenedor con la cabecera por STDIN (-K -), nunca en argv.
+
+    Devuelve (status, texto). Lanza RuntimeError si no se puede ejecutar.
+    """
+    cfg = [
+        "url = " + _curl_cfg(f"http://127.0.0.1:{port}{path}"),
+        "request = " + _curl_cfg(method),
+        "header = " + _curl_cfg("X-Master-Key: " + master),
+        "silent",
+        "show-error",
+        "max-time = " + str(int(timeout)),
+        'write-out = "\\n%{http_code}"',
+    ]
+    if payload:
+        cfg.append("header = " + _curl_cfg("Content-Type: application/json"))
+        cfg.append("data = " + _curl_cfg(payload))
+    r = subprocess.run(
+        ["docker", "exec", "-i", "socket-core", "curl", "-sS", "-K", "-"],
+        input="\n".join(cfg) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=timeout + 5,
+        shell=False,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or f"curl exit {r.returncode}")
+    cuerpo, _, codigo = (r.stdout or "").rpartition("\n")
+    try:
+        return int(codigo.strip() or "0"), cuerpo
+    except ValueError:
+        return 0, r.stdout or ""
+
+
+def admin_stats(args, master: str):
+    """GET /admin/stats directo; si no se alcanza, vía docker exec (loopback)."""
+    url = f"{args.admin}/admin/stats"
+    s, b = get_json(url, {"X-Master-Key": master})
+    if s == 200:
+        return s, b, "directo"
+    port = args.admin.rstrip("/").rsplit(":", 1)[-1] or "3015"
+    try:
+        code, texto = docker_curl_json(master, port, "/admin/stats")
+        if code == 200:
+            return 200, json.loads(texto), "docker exec"
+    except Exception:
+        pass
+    return s, b, "directo"
+
+
 def sh(cmd: str):
+    """Solo comandos sin secretos y sin interpolación de datos sensibles."""
     try:
         return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
-    except Exception as e:
+    except Exception:
         return None
+
+
+def red_gateway() -> str:
+    r = sh("docker network inspect central_network --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}'")
+    return (r.stdout or "").strip() if r and r.returncode == 0 else ""
+
+
+def red_containers() -> list:
+    """IPs de los contenedores conectados a central_network."""
+    r = sh("docker network inspect central_network --format '{{range .Containers}}{{.IPv4Address}} {{end}}'")
+    out = (r.stdout or "") if r and r.returncode == 0 else ""
+    return [x.split("/")[0].strip() for x in out.split() if x.strip()]
+
+
+def trusted_proxies_config() -> str:
+    r = sh("docker inspect socket-core --format '{{range .Config.Env}}{{println .}}{{end}}'")
+    for line in ((r.stdout or "") if r else "").splitlines():
+        if line.startswith("TRUSTED_PROXIES="):
+            return line.split("=", 1)[1].strip()
+    return ""
+
+
+def _subred_ancha(entrada: str) -> bool:
+    try:
+        net = ipaddress.ip_network(entrada.strip(), strict=False)
+    except ValueError:
+        return False
+    tope = 16 if net.version == 4 else 48
+    return net.prefixlen <= tope
+
+
+def check_trusted_proxies() -> bool:
+    """Comprueba gateway/IPs y que no se confíe una subred demasiado ancha."""
+    trusted = trusted_proxies_config()
+    gw = red_gateway()
+    candidatas = ([gw] if gw else []) + red_containers()
+    entradas = [t.strip() for t in trusted.split(",") if t.strip()]
+    if not trusted:
+        print(f"[AVISO] TRUSTED_PROXIES vacío: se ignora X-Forwarded-For y el rate limit "
+              f"por IP verá el gateway {gw or '?'}. Si Nginx está delante, añade esa IP.")
+        return False
+    anchas = [e for e in entradas if _subred_ancha(e)]
+    if anchas:
+        pintar(False, "TRUSTED_PROXIES", f"subred demasiado ancha: {', '.join(anchas)}")
+        return False
+    for ip in candidatas:
+        if ip and ip in entradas:
+            pintar(True, "TRUSTED_PROXIES", f"contiene {ip}")
+            return True
+    print(f"[AVISO] TRUSTED_PROXIES={trusted!r} no incluye el gateway {gw or '?'} "
+          f"ni IPs de central_network {candidatas}. Revisa: "
+          f"docker network inspect central_network --format '{{{{range .IPAM.Config}}}}{{{{.Gateway}}}}{{{{end}}}}'")
+    return False
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Estado del hub socket-core")
-    ap.add_argument("--core", default="https://ws.seventwo.tech")
-    ap.add_argument("--key", default="")
+    ap.add_argument("--core", default=default_core())
+    ap.add_argument("--admin", default="http://127.0.0.1:3015")
+    ap.add_argument("--master-key", default="")
     ap.add_argument("--solo-core", action="store_true", help="solo chequeos del core (sin docker/nginx/fail2ban)")
     args = ap.parse_args()
 
-    key = leer_key(args)
+    if not args.core:
+        ap.error("define SOCKET_PUBLIC_URL o pasa --core (no hay dominio por defecto)")
+
+    master = leer_master(args)
     alertas = []
 
     print(f"== socket-core @ {args.core} ==")
 
-    # 1. Contenedor + salud local
     if not args.solo_core:
         r = sh("docker inspect -f '{{.State.Status}}|{{.State.StartedAt}}' socket-core 2>/dev/null")
         if r and r.returncode == 0 and r.stdout.strip().startswith("running"):
@@ -96,7 +224,9 @@ def main() -> int:
             pintar(False, "health local :3005", str(b.get("_error", b)))
             alertas.append("health local falla")
 
-    # 2. Salud pública + stats
+        if not check_trusted_proxies():
+            alertas.append("TRUSTED_PROXIES sin configurar/incorrecto")
+
     s, b = get_json(f"{args.core}/health")
     if s == 200:
         pintar(True, "health público")
@@ -104,47 +234,27 @@ def main() -> int:
         pintar(False, "health público", str(b.get("_error", b)))
         alertas.append("health público falla")
 
-    if not key:
-        print("[AVISO] Sin key ops: define SOCKET_OPS_KEY, --key o archivo .ops_key para ver stats y canales.")
-        print("  Crear una: python3 scripts/alta_cliente.py  (nombre sugerido: ops-monitoreo, prefijo *)")
+    if not master:
+        print("[AVISO] Sin MASTER_KEY: define SOCKET_MASTER_KEY o --master-key para /admin/stats.")
     else:
-        s, b = get_json(f"{args.core}/stats", key)
+        s, b, via = admin_stats(args, master)
         if s == 200:
-            d = b["data"]
-            pintar(True, "stats", f"{d['channels']} canales, {d['total_clients']} conectados")
+            proyectos = b["data"]["projects"]
+            total_canales = sum(p.get("channels", 0) for p in proyectos)
+            total_conn = sum(p.get("connections", 0) for p in proyectos)
+            pintar(True, "admin/stats", f"{len(proyectos)} proyectos, {total_canales} canales, {total_conn} conexiones ({via})")
+            print()
+            print("-- por proyecto --")
+            print(f"  {'proyecto':28} {'revocada':8} {'canales':8} {'conexiones':10} {'clientes':8}")
+            for p in sorted(proyectos, key=lambda x: x.get("project_name", "")):
+                print(
+                    f"  {p.get('project_name','?'):28} {str(bool(p.get('revoked'))):8} "
+                    f"{p.get('channels',0):<8} {p.get('connections',0):<10} {p.get('clients',0):<8}"
+                )
         else:
-            pintar(False, "stats", b.get("error", f"HTTP {s}"))
-            alertas.append("stats con error")
+            pintar(False, "admin/stats", b.get("error", f"HTTP {s}"))
+            alertas.append("admin/stats con error")
 
-        # 3. Canales + conectados, agrupados por proyecto
-        s, b = get_json(f"{args.core}/channels", key)
-        if s == 200:
-            chans = b["data"]
-            por_proyecto: dict = {}
-            print(f"\n-- canales ({len(chans)}) --")
-            print("  (existe = guardado en DB, sobrevive reinicios | expira = nunca | estado = en_uso/idle ahora mismo)")
-            for c in sorted(chans, key=lambda x: x["name"]):
-                s2, b2 = get_json(f"{args.core}/channels/{c['id']}/clients", key)
-                cli = b2.get("data", []) if s2 == 200 else []
-                for cl in cli:
-                    por_proyecto.setdefault(cl.get("project") or "desconocido", []).append(
-                        f"{cl['id']}@{c['name']}"
-                    )
-                nombres = ",".join(x["id"] for x in cli)
-                estado = "en_uso" if c["clients_count"] > 0 else "idle"
-                print(f"  {c['name']:30} existe=sí  estado={estado:<6} conectados={c['clients_count']:<4} expira=nunca  [{nombres}]")
-            print("\n-- conectados por proyecto --")
-            if por_proyecto:
-                for proj in sorted(por_proyecto):
-                    miembros = por_proyecto[proj]
-                    print(f"  {proj}: {len(miembros)} -> {', '.join(miembros)}")
-            else:
-                print("  (nadie conectado)")
-        else:
-            pintar(False, "lista de canales", b.get("error", f"HTTP {s}"))
-            alertas.append("canales con error")
-
-    # 4. Borde: nginx + cert + fail2ban
     if not args.solo_core:
         print("")
         r = sh("systemctl is-active nginx 2>/dev/null || service nginx status 2>/dev/null | head -1")
@@ -156,7 +266,6 @@ def main() -> int:
 
         host = args.core.split("://", 1)[-1].split("/", 1)[0].split(":")[0]
         if args.core.startswith("https"):
-            # Lo que el mundo ve: handshake TLS con SNI (sin necesitar permisos root).
             try:
                 ctx = ssl.create_default_context()
                 with ctx.wrap_socket(

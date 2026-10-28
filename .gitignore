@@ -9,3 +9,10 @@
 salida.md
 proyectos.md
 proyectos/
+__pycache__/
+*.pyc
+backups/
+.last_deploy_commit
+node_modules/
+.last_good_commit
+credenciales-*.txt

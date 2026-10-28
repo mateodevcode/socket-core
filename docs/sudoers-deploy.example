@@ -1,0 +1,37 @@
+# /etc/sudoers.d/socket-core-deploy  (EJEMPLO — NO aplicado)
+#
+# POR QUÉ NO HAY COMODINES DE DOCKER AQUÍ:
+#   `docker exec`, `docker compose` y el socket de Docker son **root-equivalentes**
+#   (docker exec puede montar / y ejecutar cualquier cosa como root). Un sudoers que
+#   permita `docker ... *` da root de facto. Por eso este ejemplo NO delega docker.
+#
+# Opciones recomendadas (elige UNA):
+#   A) Ejecutar el deploy como root por SSH (lo actual), protegiendo la clave SSH,
+#      el environment `production` y los required reviewers.
+#   B) Usuario dedicado en el grupo `docker` (sigue siendo root-equivalente; úsalo
+#      solo con la misma confianza que root).
+#   C) Si necesitas sudoers, delega SOLO wrappers root-owned sin argumentos libres:
+#        /usr/local/sbin/socketcore-nginx-apply    (0755 root) copia ficheros fijos,
+#                                                   `nginx -t` y `systemctl reload`
+#        /usr/local/sbin/socketcore-fail2ban-reload
+#        /usr/local/sbin/socketcore-backup-db      (rutas fijas, sin args)
+#      y adapta scripts/deploy.sh para llamarlos. El wrapper debe validar rutas,
+#      no aceptar `sh -c`, y no permitir elegir binarios.
+#
+# Cmnd_Alias SOCKETCORE_SAFE = \
+#     /usr/local/sbin/socketcore-nginx-apply, \
+#     /usr/local/sbin/socketcore-fail2ban-reload, \
+#     /usr/local/sbin/socketcore-backup-db
+# deploy ALL=(root) NOPASSWD: SOCKETCORE_SAFE
+#
+# PROCEDIMIENTO DE APLICACIÓN (cuando decidas usar wrappers):
+#   1) visudo -cf docs/sudoers-deploy.example          # sintaxis
+#   2) Abre OTRA sesión root en paralelo (por si rompes sudo).
+#   3) sudo install -m 0440 -o root -g root docs/sudoers-deploy.example \
+#        /etc/sudoers.d/socket-core-deploy
+#   4) visudo -c                                        # valida el conjunto
+#   5) sudo -l -U deploy                                # comprueba permisos
+#   6) Prueba desde otra sesión no-root.
+#   ROLLBACK: sudo rm -f /etc/sudoers.d/socket-core-deploy && visudo -c
+#
+# Este fichero es documentación: no se instala solo.

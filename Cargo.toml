@@ -30,20 +30,31 @@ chrono = { version = "0.4", features = ["serde"] }
 # Concurrencia
 dashmap = "5.5"
 
+# Async utilities (split de WS de axum)
+futures-util = "0.3"
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Environment
-dotenv = "0.15"
-
-# WebSocket cliente (para comunicación inter-servicios)
-tokio-tungstenite = "0.24"
-futures-util = "0.3"
-url = "2"
+dotenvy = "0.15"
 
 # Seguridad: JWT + API Keys + SQLite
 jsonwebtoken = "9"
 sha2 = "0.10"
 rand = "0.8"
-sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros"] }
+subtle = "2"
+ipnet = "2"
+sqlx = { version = "0.8", default-features = false, features = [
+    "sqlite",
+    "runtime-tokio",
+    "macros",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.4", features = ["util"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio-tungstenite = "0.24"
+url = "2"

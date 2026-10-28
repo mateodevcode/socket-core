@@ -1,7 +1,11 @@
 use crate::auth::create_jwt;
+use crate::authz::{
+    authorize_channel_for_jwt, authorize_channel_for_key, AuthzError, ChannelAction,
+};
 use crate::channel_manager::ChannelManager;
-use crate::keys::{channel_allowed, ApiKey};
-use crate::middleware::{client_ip, RateLimiter, require_api_key, require_master};
+use crate::control::{ControlBus, ControlEvent};
+use crate::limits::{ConnectionRegistry, Limits, ProjectPublishLimiters};
+use crate::middleware::{require_api_key, require_jwt, require_master, ClientIp, RateLimiter};
 use crate::models::*;
 use axum::{
     extract::{Path, Query, State},
@@ -20,19 +24,48 @@ pub struct AppState {
     pub jwt_ttl_secs: i64,
     pub master_key: String,
     pub limiter: RateLimiter,
+    pub control: ControlBus,
+    pub registry: ConnectionRegistry,
+    pub limits: Limits,
+    pub publish_limits: ProjectPublishLimiters,
+    pub dev_mode: bool,
+    pub trusted_proxies: Vec<ipnet::IpNet>,
+    pub audit: crate::audit::AuditLog,
+    pub admin_guard: crate::middleware::AdminGuard,
+    pub allowed_origins: Vec<String>,
 }
 
 pub async fn health() -> impl IntoResponse {
     Json(json!({"status": "ok", "service": "socket-core"}))
 }
 
+/// Convierte un AuthzError en Response (404/403/401, sin detalles internos).
+fn authz_err(e: AuthzError) -> axum::response::Response {
+    let (code, msg) = e.status();
+    err(code, msg)
+}
+
+/// Detecta si la petición trae X-Api-Key (rama exclusiva en emit).
+fn has_api_key(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+}
+
 // ---- REST protegida ----
 
-pub async fn stats(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err((code, msg)) = require_api_key(&state, &headers, "").await {
-        return err(code, msg);
-    }
-    let (channels, clients) = state.channel_manager.stats();
+pub async fn stats(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ip: ClientIp,
+) -> impl IntoResponse {
+    let key = match require_api_key(&state, &headers, "", ip.0).await {
+        Ok(k) => k,
+        Err(v) => return err(v.0, v.1),
+    };
+    let (channels, clients) = state.channel_manager.stats_for(&key.id);
     Json(ApiResponse::ok(ServerStats {
         channels,
         total_clients: clients,
@@ -43,106 +76,134 @@ pub async fn stats(State(state): State<AppState>, headers: HeaderMap) -> impl In
 pub async fn create_channel(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ip: ClientIp,
     Json(req): Json<CreateChannelRequest>,
 ) -> impl IntoResponse {
-    let key = match require_api_key(&state, &headers, "manage").await {
+    let key = match require_api_key(&state, &headers, "manage", ip.0).await {
         Ok(k) => k,
-        Err((c, m)) => return err(c, m),
+        Err(v) => return err(v.0, v.1),
     };
-    if req.name.trim().is_empty() {
-        return err(StatusCode::BAD_REQUEST, "name requerido");
+    // Validación estructural del nombre/description ANTES de mirar prefijos.
+    if let Err(e) = crate::models::validate_channel_name(&req.name) {
+        return err(StatusCode::BAD_REQUEST, e);
     }
-    if !channel_allowed(&key, &req.name) {
+    if let Err(e) = crate::models::validate_description(req.description.as_deref()) {
+        return err(StatusCode::BAD_REQUEST, e);
+    }
+    // El nombre SIEMPRE quedará bajo el prefijo del propio proyecto.
+    if !crate::keys::channel_allowed(&key, &req.name) {
         return err(StatusCode::FORBIDDEN, "canal fuera de tu prefijo");
     }
-    match state
+    let channel =
+        match state
+            .channel_manager
+            .create_channel(key.id.clone(), req.name, req.description)
+        {
+            Ok(c) => c,
+            Err(_) => return err(StatusCode::BAD_REQUEST, "channel name already exists"),
+        };
+    // Persistencia atómica con la memoria: si falla, se deshace el alta (500).
+    if let Err(e) = state
         .channel_manager
-        .create_channel(req.name, req.description)
+        .persist(&state.keys.pool, &channel)
+        .await
     {
-        Ok(channel) => {
-            // Persistencia: el canal sobrevive a reinicios (los clientes no).
-            state.channel_manager.persist(&state.keys.pool, &channel).await;
-            (StatusCode::CREATED, Json(ApiResponse::ok(channel))).into_response()
-        }
-        Err(e) => err(StatusCode::BAD_REQUEST, e),
+        tracing::error!("no se pudo persistir el canal {}: {}", channel.id, e);
+        state.channel_manager.remove_channel(&channel.id);
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
     }
+    (StatusCode::CREATED, Json(ApiResponse::ok(channel))).into_response()
 }
 
-pub async fn list_channels(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err((c, m)) = require_api_key(&state, &headers, "").await {
-        return err(c, m);
-    }
-    Json(ApiResponse::ok(state.channel_manager.list_channels())).into_response()
+pub async fn list_channels(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ip: ClientIp,
+) -> impl IntoResponse {
+    let key = match require_api_key(&state, &headers, "", ip.0).await {
+        Ok(k) => k,
+        Err(v) => return err(v.0, v.1),
+    };
+    Json(ApiResponse::ok(
+        state.channel_manager.list_channels_for(&key.id),
+    ))
+    .into_response()
 }
 
 pub async fn get_channel(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ip: ClientIp,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err((c, m)) = require_api_key(&state, &headers, "").await {
-        return err(c, m);
-    }
-    match state.channel_manager.get_channel(&id) {
-        Some(channel) => Json(ApiResponse::ok(channel)).into_response(),
-        None => err(StatusCode::NOT_FOUND, "Channel not found"),
+    let key = match require_api_key(&state, &headers, "", ip.0).await {
+        Ok(k) => k,
+        Err(v) => return err(v.0, v.1),
+    };
+    match authorize_channel_for_key(&state.channel_manager, &key, &id, ChannelAction::View) {
+        Ok(id_canon) => {
+            let channel = state.channel_manager.get_channel(&id_canon);
+            Json(ApiResponse::ok(channel)).into_response()
+        }
+        Err(e) => authz_err(e),
     }
 }
 
 pub async fn get_channel_clients(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ip: ClientIp,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err((c, m)) = require_api_key(&state, &headers, "").await {
-        return err(c, m);
-    }
-    match state.channel_manager.get_clients(&id) {
-        Some(clients) => Json(ApiResponse::ok(clients)).into_response(),
-        None => err(StatusCode::NOT_FOUND, "Channel not found"),
+    let key = match require_api_key(&state, &headers, "", ip.0).await {
+        Ok(k) => k,
+        Err(v) => return err(v.0, v.1),
+    };
+    match authorize_channel_for_key(&state.channel_manager, &key, &id, ChannelAction::View) {
+        Ok(id_canon) => {
+            let clients = state.channel_manager.get_clients(&id_canon);
+            Json(ApiResponse::ok(clients)).into_response()
+        }
+        Err(e) => authz_err(e),
     }
 }
 
 pub async fn delete_channel(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ip: ClientIp,
     Path(id_or_name): Path<String>,
 ) -> impl IntoResponse {
-    let key = match require_api_key(&state, &headers, "manage").await {
+    let key = match require_api_key(&state, &headers, "manage", ip.0).await {
         Ok(k) => k,
-        Err((c, m)) => return err(c, m),
+        Err(v) => return err(v.0, v.1),
     };
-    // Acepta id o nombre.
-    let target_id = if state.channel_manager.get_channel(&id_or_name).is_some() {
-        id_or_name.clone()
-    } else {
-        match state
-            .channel_manager
-            .list_channels()
-            .into_iter()
-            .find(|c| c.name == id_or_name)
-        {
-            Some(c) => c.id,
-            None => return err(StatusCode::NOT_FOUND, "Channel not found"),
-        }
+    let target_id = match authorize_channel_for_key(
+        &state.channel_manager,
+        &key,
+        &id_or_name,
+        ChannelAction::Manage,
+    ) {
+        Ok(t) => t,
+        Err(e) => return authz_err(e),
     };
-    let name_lookup = state
-        .channel_manager
-        .get_channel(&target_id)
-        .map(|c| c.name);
-    let allowed = channel_allowed(&key, &target_id)
-        || name_lookup
-            .as_deref()
-            .map(|n| channel_allowed(&key, n))
-            .unwrap_or(false);
-    if !allowed {
-        return err(StatusCode::FORBIDDEN, "canal fuera de tu prefijo");
+    // Primero la DB: si falla, el canal sigue operativo (500) y no hay divergencia.
+    if let Err(e) = sqlx::query("DELETE FROM channels WHERE id = ?")
+        .bind(&target_id)
+        .execute(&state.keys.pool)
+        .await
+    {
+        tracing::error!("no se pudo borrar el canal {} en DB: {}", target_id, e);
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
     }
     if state.channel_manager.remove_channel(&target_id) {
-        let _ = sqlx::query("DELETE FROM channels WHERE id = ?")
-            .bind(&target_id)
-            .execute(&state.keys.pool)
-            .await;
+        state
+            .audit
+            .record(Some(&key.id), "channel_delete", &target_id);
+        // Cierra explícitamente las conexiones suscritas a este canal.
+        state
+            .control
+            .send(ControlEvent::CloseChannel(target_id.clone()));
         Json(ApiResponse::ok(json!({"deleted": true}))).into_response()
     } else {
         err(StatusCode::NOT_FOUND, "Channel not found")
@@ -152,53 +213,46 @@ pub async fn delete_channel(
 pub async fn emit_event(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ip: ClientIp,
     Path(id): Path<String>,
     Json(req): Json<EmitEventRequest>,
 ) -> impl IntoResponse {
-    // Servicio-a-servicio: exige API key con scope publish.
-    // (El JWT de navegador NO puede emitir directo salvo rol publish; el WS sí lo valida.)
-    let mut key_opt: Option<ApiKey> = None;
-    let mut jwt_ok = false;
-
-    if let Ok(k) = require_api_key(&state, &headers, "publish").await {
-        // Verificar que el canal objetivo esté en su prefijo (por id o nombre)
-        let name_lookup = state
-            .channel_manager
-            .get_channel(&id)
-            .map(|c| c.name.clone());
-        let allowed = channel_allowed(&k, &id)
-            || name_lookup
-                .as_deref()
-                .map(|n| channel_allowed(&k, n))
-                .unwrap_or(false);
-        if !allowed {
-            return err(StatusCode::FORBIDDEN, "canal fuera de tu prefijo");
+    // Ramas EXCLUSIVAS: si hay X-Api-Key, esa rama manda y su error es definitivo.
+    // Si no la hay, solo JWT. Sin fallback cruzado.
+    let effective_id = if has_api_key(&headers) {
+        let key = match require_api_key(&state, &headers, "publish", ip.0).await {
+            Ok(k) => k,
+            Err(v) => return err(v.0, v.1),
+        };
+        match authorize_channel_for_key(&state.channel_manager, &key, &id, ChannelAction::Publish) {
+            Ok(cid) => cid,
+            Err(e) => return authz_err(e),
         }
-        key_opt = Some(k);
     } else {
-        // Fallback: JWT Bearer con rol publish
-        match crate::middleware::require_jwt(&state, &headers, None).await {
-            Ok(claims) => {
-                if !claims.can_publish() {
-                    return err(StatusCode::FORBIDDEN, "jwt sin rol publish");
-                }
-                let name_lookup = state
-                    .channel_manager
-                    .get_channel(&id)
-                    .map(|c| c.name.clone());
-                if !crate::middleware::jwt_can_access_channel(&state, &claims, &id, name_lookup.as_deref()).await {
-                    return err(StatusCode::FORBIDDEN, "jwt no autoriza este canal");
-                }
-                jwt_ok = true;
-            }
-            Err((c, m)) => return err(c, format!("requiere X-Api-Key (publish) o JWT publish: {}", m)),
+        let claims = match require_jwt(&state, &headers, None, ip.0).await {
+            Ok(c) => c,
+            Err(v) => return err(v.0, v.1),
+        };
+        match authorize_channel_for_jwt(
+            &state.channel_manager,
+            &state.keys.pool,
+            &claims,
+            &id,
+            ChannelAction::Publish,
+        )
+        .await
+        {
+            Ok(cid) => cid,
+            Err(e) => return authz_err(e),
         }
-    }
-    let _ = (key_opt, jwt_ok);
+    };
 
-    // Rate extra por IP emisora
-    let ip_bucket = format!("emit:{}", client_ip(&headers));
-    if !state.limiter.check(&ip_bucket, 600) {
+    // Rate extra por IP emisora (fase de red ajustará la confianza en XFF)
+    let ip_bucket = format!("emit:{}", ip.0);
+    if !state
+        .limiter
+        .check(&ip_bucket, state.limits.ip_rate_per_min)
+    {
         return err(StatusCode::TOO_MANY_REQUESTS, "rate limit por IP");
     }
 
@@ -207,14 +261,19 @@ pub async fn emit_event(
     } else {
         req.source
     };
-    let event = Event::new(id.clone(), source, req.targets, req.payload);
-    match state.channel_manager.emit_event(&id, event) {
+    // Reglas de salida: source "__system__" y tipos de sistema son del servidor;
+    // targets acotados y payload con tamaño/profundidad máximos.
+    if let Err(e) = crate::models::validate_outbound(&source, &req.targets, &req.payload) {
+        return err(StatusCode::BAD_REQUEST, e.to_string());
+    }
+    let event = Event::new(effective_id.clone(), source, req.targets, req.payload);
+    match state.channel_manager.emit_event(&effective_id, event) {
         Ok(_) => (
             StatusCode::OK,
             Json(ApiResponse::ok(json!({"success": true}))),
         )
             .into_response(),
-        Err(e) => err(StatusCode::BAD_REQUEST, e),
+        Err(_) => err(StatusCode::NOT_FOUND, "Channel not found"),
     }
 }
 
@@ -223,35 +282,46 @@ pub async fn emit_event(
 pub async fn mint_token(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ip: ClientIp,
     Json(req): Json<TokenRequest>,
 ) -> impl IntoResponse {
-    let key = match require_api_key(&state, &headers, "").await {
+    let key = match require_api_key(&state, &headers, "", ip.0).await {
         Ok(k) => k,
-        Err((c, m)) => return err(c, m),
+        Err(v) => return err(v.0, v.1),
     };
     let channel = req.channel.unwrap_or_else(|| "*".into());
     let role = req.role.unwrap_or_else(|| "both".into());
     if !["publish", "subscribe", "both"].contains(&role.as_str()) {
-        return err(StatusCode::BAD_REQUEST, "role debe ser publish|subscribe|both");
+        return err(
+            StatusCode::BAD_REQUEST,
+            "role debe ser publish|subscribe|both",
+        );
     }
-    // El canal pedido debe estar dentro del prefijo del proyecto (salvo "*")
-    if channel != "*" && !channel_allowed(&key, &channel) {
+    // Identidad obligatoria y saneada (la fija el backend del proyecto).
+    let user_id = match req.user_id {
+        Some(u) => u,
+        None => return err(StatusCode::BAD_REQUEST, "user_id (sub) es obligatorio"),
+    };
+    if let Err(e) = crate::models::validate_user_id(&user_id) {
+        return err(StatusCode::BAD_REQUEST, e);
+    }
+    // Patrón de canal válido y dentro del prefijo (salvo "*").
+    if let Err(e) = crate::models::validate_channel_pattern(&channel) {
+        return err(StatusCode::BAD_REQUEST, e);
+    }
+    if channel != "*" && !crate::keys::channel_allowed(&key, &channel) {
         return err(StatusCode::FORBIDDEN, "canal fuera de tu prefijo");
     }
-    // El scope de la key debe cubrir el rol pedido
-    if role.contains("publish") && !crate::keys::has_scope(&key, "publish") {
+    // Rol EXACTO contra los scopes (nada de substring: "both" exige ambos).
+    let needs_publish = matches!(role.as_str(), "publish" | "both");
+    let needs_subscribe = matches!(role.as_str(), "subscribe" | "both");
+    if needs_publish && !crate::keys::has_scope(&key, "publish") {
         return err(StatusCode::FORBIDDEN, "key sin scope publish");
     }
-    if role.contains("subscribe") && !crate::keys::has_scope(&key, "subscribe") {
-        // "both" contiene ambos substrings; chequeo simple:
-        if role != "publish" && !crate::keys::has_scope(&key, "subscribe") {
-            return err(StatusCode::FORBIDDEN, "key sin scope subscribe");
-        }
+    if needs_subscribe && !crate::keys::has_scope(&key, "subscribe") {
+        return err(StatusCode::FORBIDDEN, "key sin scope subscribe");
     }
 
-    let user_id = req
-        .user_id
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     match create_jwt(
         &state.jwt_secret,
         state.jwt_ttl_secs,
@@ -268,17 +338,30 @@ pub async fn mint_token(
             role,
         }))
         .into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("jwt error: {}", e)),
+        Err(_) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "no se pudo emitir el token",
+        ),
     }
 }
 
 // ---- Admin (MASTER_KEY) ----
 
-pub async fn admin_list_keys(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err((c, m)) = require_master(&headers, &state.master_key) {
+pub async fn admin_list_keys(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ip: ClientIp,
+) -> impl IntoResponse {
+    if let Err((c, m)) = require_master(&state, &headers, ip.0) {
         return err(c, m);
     }
-    let keys = state.keys.list().await;
+    let keys = match state.keys.list().await {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::error!("admin_list_keys: {}", e);
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+        }
+    };
     let pub_keys: Vec<ApiKeyPublic> = keys
         .into_iter()
         .map(|k| ApiKeyPublic {
@@ -299,43 +382,96 @@ pub async fn admin_list_keys(State(state): State<AppState>, headers: HeaderMap) 
 pub async fn admin_create_key(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ip: ClientIp,
     Json(req): Json<CreateKeyRequest>,
 ) -> impl IntoResponse {
-    if let Err((c, m)) = require_master(&headers, &state.master_key) {
+    if let Err((c, m)) = require_master(&state, &headers, ip.0) {
         return err(c, m);
     }
     if req.name.trim().is_empty() {
         return err(StatusCode::BAD_REQUEST, "name requerido");
     }
-    let expires_at = req
-        .expires_in_days
-        .map(|d| chrono::Utc::now().timestamp() + d * 86400);
+    if !(1..=100_000).contains(&req.rate_limit_per_min) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "rate_limit_per_min debe estar entre 1 y 100000",
+        );
+    }
+    if let Some(d) = req.expires_in_days {
+        if !(1..=crate::models::MAX_EXPIRES_DAYS).contains(&d) {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "expires_in_days debe estar entre 1 y 3650",
+            );
+        }
+    }
+    if let Err(e) = crate::models::validate_scopes(&req.scopes) {
+        return err(StatusCode::BAD_REQUEST, e);
+    }
+    if let Err(e) = crate::models::validate_domains(&req.domains) {
+        return err(StatusCode::BAD_REQUEST, e);
+    }
+    let prefix = if req.channel_prefix.trim().is_empty() {
+        "*".to_string()
+    } else {
+        req.channel_prefix.trim().to_string()
+    };
+    if let Err(e) = crate::models::validate_channel_prefix(&prefix) {
+        return err(StatusCode::BAD_REQUEST, e);
+    }
+    let expires_at = match req.expires_in_days {
+        Some(d) => match d
+            .checked_mul(86400)
+            .and_then(|v| chrono::Utc::now().timestamp().checked_add(v))
+        {
+            Some(v) => Some(v),
+            None => return err(StatusCode::BAD_REQUEST, "expires_in_days inválido"),
+        },
+        None => None,
+    };
+    // Alta atómica (nombre + solape de prefijo + INSERT en una transacción).
     match state
         .keys
-        .create(
+        .create_checked(
             req.name,
             req.domains,
-            req.channel_prefix,
+            prefix,
             req.scopes,
             req.rate_limit_per_min,
             expires_at,
         )
         .await
     {
-        Ok((k, raw)) => (
-            StatusCode::CREATED,
-            Json(ApiResponse::ok(CreateKeyResponse {
-                id: k.id,
-                name: k.name,
-                api_key: raw,
-                domains: k.domains,
-                channel_prefix: k.channel_prefixes.join(","),
-                scopes: k.scopes,
-                rate_limit_per_min: k.rate_limit_per_min,
-                expires_at: k.expires_at,
-            })),
-        )
-            .into_response(),
+        Ok((k, raw)) => {
+            state.audit.record(Some(&k.id), "key_create", &k.name);
+            (
+                StatusCode::CREATED,
+                Json(ApiResponse::ok(CreateKeyResponse {
+                    id: k.id,
+                    name: k.name,
+                    api_key: raw,
+                    domains: k.domains,
+                    channel_prefix: k.channel_prefixes.join(","),
+                    scopes: k.scopes,
+                    rate_limit_per_min: k.rate_limit_per_min,
+                    expires_at: k.expires_at,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) if e == "name ya existe" => err(StatusCode::CONFLICT, e),
+        Err(e) if e == "busy" => err(StatusCode::SERVICE_UNAVAILABLE, "busy"),
+        Err(e) if e.starts_with("prefix_conflict:") => {
+            let otra = e.trim_start_matches("prefix_conflict:");
+            err(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "channel_prefix solapa con el proyecto '{}' (incluye keys revocadas; bórrala o cámbiale el prefijo para liberarlo)",
+                    otra
+                ),
+            )
+        }
+        Err(e) if e == "internal error" => err(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
         Err(e) => err(StatusCode::BAD_REQUEST, e),
     }
 }
@@ -343,26 +479,86 @@ pub async fn admin_create_key(
 pub async fn admin_revoke_key(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ip: ClientIp,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err((c, m)) = require_master(&headers, &state.master_key) {
+    if let Err((c, m)) = require_master(&state, &headers, ip.0) {
         return err(c, m);
     }
-    if state.keys.revoke(&id).await {
-        Json(ApiResponse::ok(json!({"revoked": true}))).into_response()
-    } else {
-        err(StatusCode::NOT_FOUND, "key no encontrada")
+    match state.keys.revoke(&id).await {
+        Ok(true) => {
+            state.audit.record(Some(&id), "key_revoke", "ok");
+            Json(ApiResponse::ok(json!({"revoked": true}))).into_response()
+        }
+        Ok(false) => err(StatusCode::NOT_FOUND, "key no encontrada"),
+        Err(e) => {
+            tracing::error!("admin_revoke_key: {}", e);
+            err(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
     }
 }
 
 pub async fn admin_update_key(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ip: ClientIp,
     Path(id): Path<String>,
     Json(req): Json<UpdateKeyRequest>,
 ) -> impl IntoResponse {
-    if let Err((c, m)) = require_master(&headers, &state.master_key) {
+    if let Err((c, m)) = require_master(&state, &headers, ip.0) {
         return err(c, m);
+    }
+    if let Some(r) = req.rate_limit_per_min {
+        if !(1..=100_000).contains(&r) {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "rate_limit_per_min debe estar entre 1 y 100000",
+            );
+        }
+    }
+    if let Some(d) = req.expires_in_days {
+        if d != 0 && !(1..=crate::models::MAX_EXPIRES_DAYS).contains(&d) {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "expires_in_days debe ser 0 (sin expiración) o 1..=3650",
+            );
+        }
+    }
+    if let Some(scopes) = req.scopes.as_ref() {
+        if let Err(e) = crate::models::validate_scopes(scopes) {
+            return err(StatusCode::BAD_REQUEST, e);
+        }
+    }
+    if let Some(domains) = req.domains.as_ref() {
+        if let Err(e) = crate::models::validate_domains(domains) {
+            return err(StatusCode::BAD_REQUEST, e);
+        }
+    }
+    if let Some(prefix) = req.channel_prefix.as_deref() {
+        let normalized = if prefix.trim().is_empty() {
+            "*".to_string()
+        } else {
+            prefix.trim().to_string()
+        };
+        if let Err(e) = crate::models::validate_channel_prefix(&normalized) {
+            return err(StatusCode::BAD_REQUEST, e);
+        }
+        match state.keys.prefix_conflicts(&normalized, Some(&id)).await {
+            Ok(Some(otra)) => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "channel_prefix solapa con el proyecto '{}' (incluye keys revocadas; bórrala o cámbiale el prefijo para liberarlo)",
+                        otra
+                    ),
+                )
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::error!("admin_update_key: {}", e);
+                return err(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+            }
+        }
     }
     match state
         .keys
@@ -377,23 +573,27 @@ pub async fn admin_update_key(
         )
         .await
     {
-        Ok(k) => Json(ApiResponse::ok(ApiKeyPublic {
-            id: k.id,
-            name: k.name,
-            domains: k.domains,
-            channel_prefixes: k.channel_prefixes,
-            scopes: k.scopes,
-            rate_limit_per_min: k.rate_limit_per_min,
-            expires_at: k.expires_at,
-            revoked: k.revoked,
-            created_at: k.created_at,
-        }))
-        .into_response(),
+        Ok(k) => {
+            state.audit.record(Some(&k.id), "key_update", &k.name);
+            Json(ApiResponse::ok(ApiKeyPublic {
+                id: k.id,
+                name: k.name,
+                domains: k.domains,
+                channel_prefixes: k.channel_prefixes,
+                scopes: k.scopes,
+                rate_limit_per_min: k.rate_limit_per_min,
+                expires_at: k.expires_at,
+                revoked: k.revoked,
+                created_at: k.created_at,
+            }))
+            .into_response()
+        }
         Err(e) => {
-            let code = if e == "key no encontrada" {
-                StatusCode::NOT_FOUND
-            } else {
-                StatusCode::BAD_REQUEST
+            let code = match e.as_str() {
+                "key no encontrada" => StatusCode::NOT_FOUND,
+                "name ya existe" => StatusCode::CONFLICT,
+                "internal error" => StatusCode::INTERNAL_SERVER_ERROR,
+                _ => StatusCode::BAD_REQUEST,
             };
             err(code, e)
         }
@@ -403,15 +603,35 @@ pub async fn admin_update_key(
 pub async fn admin_delete_key(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ip: ClientIp,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err((c, m)) = require_master(&headers, &state.master_key) {
+    if let Err((c, m)) = require_master(&state, &headers, ip.0) {
         return err(c, m);
     }
-    if state.keys.delete(&id).await {
-        Json(ApiResponse::ok(json!({"deleted": true}))).into_response()
-    } else {
-        err(StatusCode::NOT_FOUND, "key no encontrada")
+    let canales = state.channel_manager.list_channels_for(&id);
+    match state.keys.delete_cascade(&id).await {
+        Ok(Some(n)) => {
+            // Cierra explícitamente cada canal y lo quita de memoria.
+            for ch in &canales {
+                state
+                    .control
+                    .send(ControlEvent::CloseChannel(ch.id.clone()));
+                state.channel_manager.remove_channel(&ch.id);
+            }
+            state
+                .audit
+                .record(Some(&id), "key_delete", &format!("canales={}", n));
+            Json(ApiResponse::ok(
+                json!({"deleted": true, "channels_deleted": n}),
+            ))
+            .into_response()
+        }
+        Ok(None) => err(StatusCode::NOT_FOUND, "key no encontrada"),
+        Err(e) => {
+            tracing::error!("admin_delete_key: {}", e);
+            err(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
     }
 }
 
@@ -423,15 +643,15 @@ pub struct RevokeQuery {
 pub async fn admin_revoke_token(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ip: ClientIp,
     Query(q): Query<RevokeQuery>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    if let Err((c, m)) = require_master(&headers, &state.master_key) {
+    if let Err((c, m)) = require_master(&state, &headers, ip.0) {
         return err(c, m);
     }
     let jti = q.jti.or_else(|| {
-        body
-            .get("jti")
+        body.get("jti")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
     });
@@ -440,18 +660,62 @@ pub async fn admin_revoke_token(
     };
     // exp aproximada: ahora + ttl (la limpieza la purga después)
     let exp = chrono::Utc::now().timestamp() + state.jwt_ttl_secs;
-    state.keys.revoke_token(&jti, exp).await;
-    Json(ApiResponse::ok(json!({"revoked": true, "jti": jti}))).into_response()
+    match state.keys.revoke_token(&jti, exp).await {
+        Ok(_) => {
+            state.audit.record(None, "token_revoke", &jti);
+            Json(ApiResponse::ok(json!({"revoked": true, "jti": jti}))).into_response()
+        }
+        Err(e) => {
+            tracing::error!("admin_revoke_token: {}", e);
+            err(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
+    }
+}
+
+/// GET /admin/stats: visión global por proyecto (solo lectura, sin payloads).
+pub async fn admin_stats(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ip: ClientIp,
+) -> impl IntoResponse {
+    if let Err((c, m)) = require_master(&state, &headers, ip.0) {
+        return err(c, m);
+    }
+    let keys = match state.keys.list().await {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::error!("admin_stats: {}", e);
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+        }
+    };
+    let mut rows = Vec::new();
+    for k in keys {
+        let (channels, clients) = state.channel_manager.stats_for(&k.id);
+        let connections = state.registry.project_count(&k.id);
+        rows.push(json!({
+            "project_id": k.id,
+            "project_name": k.name,
+            "revoked": k.revoked,
+            "channels": channels,
+            "connections": connections,
+            "clients": clients,
+        }));
+    }
+    Json(ApiResponse::ok(json!({ "projects": rows }))).into_response()
 }
 
 fn err(code: StatusCode, msg: impl Into<String>) -> axum::response::Response {
-    (
-        code,
-        Json(ApiResponse::<()> {
-            success: false,
-            data: None,
-            error: Some(msg.into()),
-        }),
-    )
-        .into_response()
+    let body = Json(ApiResponse::<()> {
+        success: false,
+        data: None,
+        error: Some(msg.into()),
+    });
+    let mut resp = (code, body).into_response();
+    if code == StatusCode::TOO_MANY_REQUESTS || code == StatusCode::SERVICE_UNAVAILABLE {
+        resp.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_static("60"),
+        );
+    }
+    resp
 }

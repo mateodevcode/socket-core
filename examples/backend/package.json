@@ -1,0 +1,13 @@
+{
+  "name": "socket-core-example-backend",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "description": "Mini backend de ejemplo: emite JWT de socket-core desde el backend",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}

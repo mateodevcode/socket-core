@@ -29,20 +29,267 @@ impl Event {
     }
 }
 
+pub const SYSTEM_SOURCE: &str = "__system__";
+pub const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
+pub const MAX_PAYLOAD_DEPTH: usize = 16;
+pub const MAX_TARGETS: usize = 50;
+pub const MAX_TARGET_LEN: usize = 128;
+pub const SYSTEM_EVENT_TYPES: &[&str] = &["client_joined", "client_left", "missed_events"];
+
+pub fn is_reserved_event_type(t: &str) -> bool {
+    SYSTEM_EVENT_TYPES.contains(&t)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum EventError {
+    ReservedSource,
+    ReservedType(String),
+    TooManyTargets,
+    TargetTooLong,
+    PayloadTooLarge,
+    PayloadTooDeep,
+}
+
+impl std::fmt::Display for EventError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EventError::ReservedSource => write!(f, "source reservado"),
+            EventError::ReservedType(t) => write!(f, "tipo de evento reservado: {}", t),
+            EventError::TooManyTargets => write!(f, "demasiados targets (max {})", MAX_TARGETS),
+            EventError::TargetTooLong => {
+                write!(f, "target demasiado largo (max {})", MAX_TARGET_LEN)
+            }
+            EventError::PayloadTooLarge => write!(
+                f,
+                "payload demasiado grande (max {} bytes)",
+                MAX_PAYLOAD_BYTES
+            ),
+            EventError::PayloadTooDeep => write!(
+                f,
+                "profundidad de payload excedida (max {})",
+                MAX_PAYLOAD_DEPTH
+            ),
+        }
+    }
+}
+
+impl std::error::Error for EventError {}
+
+/// Valida reglas de salida comunes a REST y WS.
+pub fn validate_outbound(
+    source: &str,
+    targets: &[String],
+    payload: &serde_json::Value,
+) -> Result<(), EventError> {
+    if source == SYSTEM_SOURCE {
+        return Err(EventError::ReservedSource);
+    }
+    if let Some(t) = payload.get("type").and_then(|v| v.as_str()) {
+        if is_reserved_event_type(t) {
+            return Err(EventError::ReservedType(t.to_string()));
+        }
+    }
+    if targets.len() > MAX_TARGETS {
+        return Err(EventError::TooManyTargets);
+    }
+    for t in targets {
+        if t.len() > MAX_TARGET_LEN {
+            return Err(EventError::TargetTooLong);
+        }
+    }
+    let bytes = serde_json::to_vec(payload).map_err(|_| EventError::PayloadTooLarge)?;
+    if bytes.len() > MAX_PAYLOAD_BYTES {
+        return Err(EventError::PayloadTooLarge);
+    }
+    if depth_of(payload) > MAX_PAYLOAD_DEPTH {
+        return Err(EventError::PayloadTooDeep);
+    }
+    Ok(())
+}
+
+pub const ALLOWED_SCOPES: [&str; 3] = ["publish", "subscribe", "manage"];
+pub const MAX_EXPIRES_DAYS: i64 = 3650;
+
+/// Scopes permitidos, sin duplicados. (Los comodines "*"/"admin" ya no existen.)
+pub fn validate_scopes(scopes: &[String]) -> Result<(), String> {
+    let mut vistos = std::collections::HashSet::new();
+    for s in scopes {
+        if !ALLOWED_SCOPES.contains(&s.as_str()) {
+            return Err(format!(
+                "scope no permitido: '{}' (usa publish, subscribe, manage)",
+                s
+            ));
+        }
+        if !vistos.insert(s.clone()) {
+            return Err(format!("scope duplicado: '{}'", s));
+        }
+    }
+    Ok(())
+}
+
+fn host_valido(h: &str) -> bool {
+    !h.is_empty()
+        && h.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '_'))
+}
+
+/// domains: "*", "*.dominio" o URL con esquema http/https.
+pub fn validate_domains(domains: &[String]) -> Result<(), String> {
+    for d in domains {
+        if d == "*" {
+            continue;
+        }
+        if let Some(rest) = d.strip_prefix("*.") {
+            if !host_valido(rest) {
+                return Err(format!("dominio inválido: '{}'", d));
+            }
+            continue;
+        }
+        if let Some(rest) = d
+            .strip_prefix("https://")
+            .or_else(|| d.strip_prefix("http://"))
+        {
+            let host = rest.split('/').next().unwrap_or("");
+            if !host_valido(host) {
+                return Err(format!("dominio inválido: '{}'", d));
+            }
+            continue;
+        }
+        return Err(format!(
+            "dominio inválido: '{}' (usa '*', '*.dominio' o http(s)://host)",
+            d
+        ));
+    }
+    Ok(())
+}
+
+/// Prefijos: "*", "nombre:*" o nombre exacto, con el charset/longitud de canales.
+pub fn validate_channel_prefix(prefix_s: &str) -> Result<(), String> {
+    for p in prefix_s
+        .split(',')
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+    {
+        if p == "*" {
+            continue;
+        }
+        let base = p.strip_suffix(":*").unwrap_or(p);
+        validate_channel_name(base)
+            .map_err(|e| format!("channel_prefix inválido '{}': {}", p, e))?;
+    }
+    Ok(())
+}
+
+pub const MAX_ID_LEN: usize = 128;
+pub const MAX_CHANNEL_NAME_LEN: usize = 128;
+pub const MAX_DESCRIPTION_LEN: usize = 500;
+
+/// Identidad de usuario (sub del JWT): obligatoria, <=128, charset seguro,
+/// sin comodines ni separador de canal.
+pub fn validate_user_id(s: &str) -> Result<(), String> {
+    if s.trim().is_empty() {
+        return Err("user_id (sub) es obligatorio".into());
+    }
+    if s.chars().count() > MAX_ID_LEN {
+        return Err(format!("user_id demasiado largo (max {})", MAX_ID_LEN));
+    }
+    if s.contains('*') || s.contains(':') {
+        return Err("user_id no puede contener '*' ni ':'".into());
+    }
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '@' | '+'))
+    {
+        return Err("user_id contiene caracteres no permitidos".into());
+    }
+    Ok(())
+}
+
+fn valid_segment(seg: &str) -> bool {
+    !seg.is_empty()
+        && seg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+fn validate_name_core(name: &str) -> Result<(), String> {
+    if name.chars().count() > MAX_CHANNEL_NAME_LEN {
+        return Err(format!(
+            "nombre de canal demasiado largo (max {})",
+            MAX_CHANNEL_NAME_LEN
+        ));
+    }
+    if name.starts_with(':') || name.ends_with(':') || name.contains("::") {
+        return Err("nombre de canal con segmento vacío".into());
+    }
+    if !name.split(':').all(valid_segment) {
+        return Err("nombre de canal con caracteres no permitidos".into());
+    }
+    Ok(())
+}
+
+/// Nombre de canal real: sin comodines, <=128, charset seguro, no puede ser un UUID.
+pub fn validate_channel_name(name: &str) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("name requerido".into());
+    }
+    if uuid::Uuid::parse_str(name).is_ok() {
+        return Err("un UUID no es un nombre de canal válido".into());
+    }
+    validate_name_core(name)
+}
+
+/// Patrón de canal para JWT: igual que un nombre o "prefijo:*".
+pub fn validate_channel_pattern(pattern: &str) -> Result<(), String> {
+    if pattern == "*" {
+        return Ok(());
+    }
+    if let Some(core) = pattern.strip_suffix(":*") {
+        if core.is_empty() {
+            return Err("prefijo de canal vacío".into());
+        }
+        return validate_name_core(core);
+    }
+    validate_channel_name(pattern)
+}
+
+pub fn validate_description(desc: Option<&str>) -> Result<(), String> {
+    if let Some(d) = desc {
+        if d.chars().count() > MAX_DESCRIPTION_LEN {
+            return Err(format!(
+                "description demasiado larga (max {})",
+                MAX_DESCRIPTION_LEN
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn depth_of(v: &serde_json::Value) -> usize {
+    match v {
+        serde_json::Value::Object(map) => 1 + map.values().map(depth_of).max().unwrap_or(0),
+        serde_json::Value::Array(arr) => 1 + arr.iter().map(depth_of).max().unwrap_or(0),
+        _ => 1,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Channel {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub project_id: String,
     pub description: Option<String>,
     pub created_at: i64,
     pub clients_count: usize,
 }
 
 impl Channel {
-    pub fn new(name: String, description: Option<String>) -> Self {
+    pub fn new(name: String, project_id: String, description: Option<String>) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
             name,
+            project_id,
             description,
             created_at: chrono::Utc::now().timestamp(),
             clients_count: 0,
@@ -52,9 +299,16 @@ impl Channel {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientInfo {
+    /// Identidad del usuario final: el `sub` del JWT (no la elige el cliente).
     pub id: String,
+    /// Identificador de ESTA conexión, generado por el servidor.
+    /// Un usuario puede tener varias conexiones simultáneas.
+    pub connection_id: String,
+    /// Nombre de dispositivo opcional saneado proveniente del handshake.
+    #[serde(default)]
+    pub device: Option<String>,
     pub client_type: ClientType,
-    /// Proyecto dueño de la conexión (del JWT / service key). Para ver por proyecto.
+    /// Proyecto dueño de la conexión (del JWT). Para ver por proyecto.
     #[serde(default)]
     pub project: String,
     pub connected_at: i64,

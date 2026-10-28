@@ -1,7 +1,8 @@
 use crate::models::{Channel, ClientInfo, ClientType, Event};
 use dashmap::DashMap;
 use serde_json::json;
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use tracing::{debug, info};
 
@@ -10,6 +11,8 @@ pub type ChannelBroadcast = broadcast::Sender<Event>;
 #[derive(Clone)]
 pub struct ChannelManager {
     channels: Arc<DashMap<String, ChannelData>>,
+    /// Nombres reservados: garantiza creación atómica (sin carrera por nombre).
+    names: Arc<Mutex<HashSet<String>>>,
 }
 
 struct ChannelData {
@@ -22,23 +25,28 @@ impl ChannelManager {
     pub fn new() -> Self {
         Self {
             channels: Arc::new(DashMap::new()),
+            names: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
     pub fn create_channel(
         &self,
+        project_id: String,
         name: String,
         description: Option<String>,
     ) -> Result<Channel, String> {
-        if self
-            .channels
-            .iter()
-            .any(|entry| entry.value().channel.name == name)
+        // Reserva atómica del nombre (evita carreras entre peticiones concurrentes).
         {
-            return Err(format!("Channel '{}' already exists", name));
+            let mut names = self
+                .names
+                .lock()
+                .map_err(|_| "internal error".to_string())?;
+            if !names.insert(name.clone()) {
+                return Err(format!("Channel '{}' already exists", name));
+            }
         }
 
-        let channel = Channel::new(name, description);
+        let channel = Channel::new(name, project_id, description);
         let (tx, _) = broadcast::channel(1000);
 
         self.channels.insert(
@@ -50,14 +58,38 @@ impl ChannelManager {
             },
         );
 
-        info!("Channel created: {}", channel.id);
+        info!(
+            "Channel created: {} (project={})",
+            channel.id, channel.project_id
+        );
         Ok(channel)
+    }
+
+    /// Resuelve un canal por id O por nombre (los clientes usan el nombre, los
+    /// backends el id). Es la única puerta de entrada para referenciar canales.
+    pub fn resolve_channel(&self, channel_id_or_name: &str) -> Option<Channel> {
+        if let Some(v) = self.channels.get(channel_id_or_name) {
+            return Some(v.value().channel.clone());
+        }
+        self.channels
+            .iter()
+            .find(|e| e.value().channel.name == channel_id_or_name)
+            .map(|e| e.value().channel.clone())
     }
 
     pub fn get_channel(&self, channel_id: &str) -> Option<Channel> {
         self.channels
             .get(channel_id)
             .map(|entry| entry.value().channel.clone())
+    }
+
+    /// Canales VISIBLES para un proyecto (dueño). Los ajenos ni aparecen.
+    pub fn list_channels_for(&self, project_id: &str) -> Vec<Channel> {
+        self.channels
+            .iter()
+            .map(|entry| entry.value().channel.clone())
+            .filter(|c| c.project_id == project_id)
+            .collect()
     }
 
     pub fn list_channels(&self) -> Vec<Channel> {
@@ -67,10 +99,15 @@ impl ChannelManager {
             .collect()
     }
 
+    /// Suscribe una CONEXIÓN (identificada por connection_id generado por el servidor).
+    /// `user_id` es la identidad del usuario (sub del JWT); puede repetirse.
+    #[allow(clippy::too_many_arguments)]
     pub fn subscribe(
         &self,
         channel_id: &str,
-        client_id: String,
+        user_id: String,
+        connection_id: String,
+        device: Option<String>,
         client_type: ClientType,
         project: String,
     ) -> Result<ChannelBroadcast, String> {
@@ -80,58 +117,65 @@ impl ChannelManager {
             .ok_or("Channel not found")?;
 
         let client_info = ClientInfo {
-            id: client_id.clone(),
+            id: user_id.clone(),
+            connection_id: connection_id.clone(),
+            device,
             client_type,
             project,
             connected_at: chrono::Utc::now().timestamp(),
         };
 
-        channel_data.clients.insert(client_id.clone(), client_info);
+        channel_data
+            .clients
+            .insert(connection_id.clone(), client_info);
         channel_data.channel.clients_count = channel_data.clients.len();
 
         info!(
-            "Client {} subscribed to channel {}",
-            client_id, channel_id
+            "Client {} (conn {}) subscribed to channel {}",
+            user_id, connection_id, channel_id
         );
         Ok(channel_data.tx.clone())
     }
 
-    pub fn unsubscribe(&self, channel_id: &str, client_id: &str) {
+    /// Elimina UNA conexión (connection_id) y notifica la salida.
+    pub fn unsubscribe(&self, channel_id: &str, connection_id: &str) {
+        let mut left: Option<(String, Vec<ClientInfo>, usize)> = None;
         if let Some(mut channel_data) = self.channels.get_mut(channel_id) {
-            channel_data.clients.remove(client_id);
+            let user = channel_data
+                .clients
+                .remove(connection_id)
+                .map(|(_, info)| info.id)
+                .unwrap_or_default();
             channel_data.channel.clients_count = channel_data.clients.len();
 
             info!(
-                "Client {} unsubscribed from channel {}",
-                client_id, channel_id
+                "Client {} (conn {}) unsubscribed from channel {}",
+                user, connection_id, channel_id
             );
 
-            let clients_list: Vec<String> = channel_data
-                .clients
-                .iter()
-                .map(|entry| entry.key().clone())
-                .collect();
-
-            let leave_event = Event::new(
-                channel_id.to_string(),
-                "__system__".to_string(),
-                vec!["*".to_string()],
-                json!({
-                    "type": "client_left",
-                    "client_id": client_id,
-                    "clients": clients_list,
-                    "total_clients": channel_data.clients.len()
-                }),
-            );
-            let _ = channel_data.tx.send(leave_event);
+            left = Some((user, Vec::new(), channel_data.clients.len()));
+        }
+        if let Some((user, _clients, total)) = left {
+            if let Some(channel_data) = self.channels.get(channel_id) {
+                // Presencia mínima: solo la conexión afectada, sin listas completas.
+                let leave_event = Event::new(
+                    channel_id.to_string(),
+                    crate::models::SYSTEM_SOURCE.to_string(),
+                    vec!["*".to_string()],
+                    json!({
+                        "type": "client_left",
+                        "user": user,
+                        "connection_id": connection_id,
+                        "total_clients": total
+                    }),
+                );
+                let _ = channel_data.tx.send(leave_event);
+            }
         }
     }
 
     pub fn emit_event(&self, channel_id: &str, event: Event) -> Result<(), String> {
-        let channel_data = self
-            .channels
-            .get(channel_id)
-            .ok_or("Channel not found")?;
+        let channel_data = self.channels.get(channel_id).ok_or("Channel not found")?;
         debug!("Emitting event {} to channel {}", event.id, channel_id);
         let _ = channel_data.tx.send(event);
         Ok(())
@@ -157,39 +201,68 @@ impl ChannelManager {
         (channels, total_clients)
     }
 
+    /// Stats VISIBLES para un proyecto: cuenta solo sus canales y sus clientes.
+    pub fn stats_for(&self, project_id: &str) -> (usize, usize) {
+        let mut channels = 0usize;
+        let mut total_clients = 0usize;
+        for entry in self.channels.iter() {
+            if entry.value().channel.project_id == project_id {
+                channels += 1;
+                total_clients += entry.value().clients.len();
+            }
+        }
+        (channels, total_clients)
+    }
+
     /// Elimina el canal de memoria. Los suscritos activos se desconectan solos
     /// (el broadcast se cierra al caer el último Sender).
     pub fn remove_channel(&self, channel_id: &str) -> bool {
-        self.channels.remove(channel_id).is_some()
+        let removed = self
+            .channels
+            .remove(channel_id)
+            .map(|(_, data)| data.channel.name);
+        if let Some(name) = removed {
+            if let Ok(mut names) = self.names.lock() {
+                names.remove(&name);
+            }
+            true
+        } else {
+            false
+        }
     }
 
     /// Guarda/actualiza el registro del canal en SQLite (los clientes no se persisten).
-    pub async fn persist(&self, pool: &sqlx::SqlitePool, ch: &Channel) {
-        let _ = sqlx::query(
-            "INSERT INTO channels (id, name, description, created_at) VALUES (?,?,?,?)
-             ON CONFLICT(id) DO UPDATE SET name=excluded.name, description=excluded.description",
+    /// FAIL-CLOSED: propaga el error para que el llamante haga rollback y devuelva 500.
+    pub async fn persist(&self, pool: &sqlx::SqlitePool, ch: &Channel) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO channels (id, name, project_id, description, created_at) VALUES (?,?,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET name=excluded.name, project_id=excluded.project_id, description=excluded.description",
         )
         .bind(&ch.id)
         .bind(&ch.name)
+        .bind(&ch.project_id)
         .bind(&ch.description)
         .bind(ch.created_at)
         .execute(pool)
-        .await;
+        .await?;
+        Ok(())
     }
 
     /// Recarga en memoria los canales persistidos (con broadcast y clientes frescos).
     /// Los IDs se conservan, así que los JWT atados a un canal siguen valiendo tras reinicios.
-    pub async fn load_persisted(&self, pool: &sqlx::SqlitePool) -> usize {
-        let rows = sqlx::query_as::<_, (String, String, Option<String>, i64)>(
-            "SELECT id, name, description, created_at FROM channels",
+    pub async fn load_persisted(&self, pool: &sqlx::SqlitePool) -> Result<usize, sqlx::Error> {
+        let rows = sqlx::query_as::<_, (String, String, String, Option<String>, i64)>(
+            "SELECT id, name, project_id, description, created_at FROM channels",
         )
         .fetch_all(pool)
-        .await
-        .unwrap_or_default();
+        .await?;
         let mut n = 0;
-        for (id, name, description, created_at) in rows {
+        for (id, name, project_id, description, created_at) in rows {
             if self.channels.contains_key(&id) {
                 continue;
+            }
+            if let Ok(mut names) = self.names.lock() {
+                names.insert(name.clone());
             }
             let (tx, _) = broadcast::channel(1000);
             self.channels.insert(
@@ -198,6 +271,7 @@ impl ChannelManager {
                     channel: Channel {
                         id,
                         name,
+                        project_id,
                         description,
                         created_at,
                         clients_count: 0,
@@ -211,7 +285,7 @@ impl ChannelManager {
         if n > 0 {
             info!("Canales restaurados desde SQLite: {}", n);
         }
-        n
+        Ok(n)
     }
 }
 

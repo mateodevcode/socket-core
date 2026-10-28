@@ -1,20 +1,26 @@
 use chrono::Utc;
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 pub const KEY_PREFIX: &str = "sc_live_";
+pub const JWT_ISSUER: &str = "socket-core";
+pub const JWT_AUDIENCE: &str = "socket-core";
+/// Tolerancia máxima de reloj al validar exp/iat (segundos).
+pub const JWT_LEEWAY_SECS: u64 = 5;
 
 /// Claims del JWT de corta vida emitido por socket-core.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
-    pub sub: String,          // user_id / client_id
+    pub sub: String,          // user_id / identidad del usuario
     pub project_id: String,   // api_keys.id
-    pub project_name: String,  // api_keys.name
+    pub project_name: String, // api_keys.name
     pub channel: String,      // canal autorizado o "*" dentro del prefijo
     pub role: String,         // "publish" | "subscribe" | "both"
     pub jti: String,
+    pub iss: String,
+    pub aud: String,
     pub iat: i64,
     pub exp: i64,
 }
@@ -64,11 +70,13 @@ pub fn create_jwt(
         channel: channel.to_string(),
         role: role.to_string(),
         jti: jti.clone(),
+        iss: JWT_ISSUER.to_string(),
+        aud: JWT_AUDIENCE.to_string(),
         iat: now,
         exp: now + ttl_secs,
     };
     let token = encode(
-        &Header::default(),
+        &Header::new(Algorithm::HS256),
         &claims,
         &EncodingKey::from_secret(secret.as_bytes()),
     )?;
@@ -76,8 +84,16 @@ pub fn create_jwt(
 }
 
 pub fn decode_jwt(secret: &str, token: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
-    let mut validation = Validation::default();
+    // Algoritmo fijado (HS256): el JWT nunca negocia otro.
+    let mut validation = Validation::new(Algorithm::HS256);
     validation.validate_exp = true;
+    validation.required_spec_claims = ["exp", "iss", "aud"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    validation.set_issuer(&[JWT_ISSUER]);
+    validation.set_audience(&[JWT_AUDIENCE]);
+    validation.leeway = JWT_LEEWAY_SECS;
     let data = decode::<Claims>(
         token,
         &DecodingKey::from_secret(secret.as_bytes()),
@@ -87,7 +103,11 @@ pub fn decode_jwt(secret: &str, token: &str) -> Result<Claims, jsonwebtoken::err
 }
 
 /// Extrae token de `Authorization: Bearer <t>` o query `?token=<t>`.
-pub fn bearer_from_header(headers: &axum::http::HeaderMap, query_token: Option<&str>) -> Option<String> {    if let Some(auth) = headers.get(axum::http::header::AUTHORIZATION) {
+pub fn bearer_from_header(
+    headers: &axum::http::HeaderMap,
+    query_token: Option<&str>,
+) -> Option<String> {
+    if let Some(auth) = headers.get(axum::http::header::AUTHORIZATION) {
         if let Ok(s) = auth.to_str() {
             if let Some(t) = s.strip_prefix("Bearer ") {
                 return Some(t.trim().to_string());
@@ -111,10 +131,12 @@ mod tests {
 
     #[test]
     fn jwt_roundtrip_and_roles() {
-        let (tok, _) = create_jwt("secret-test", 600, "p1", "demo", "u1", "demo:a", "both").unwrap();
+        let (tok, _) =
+            create_jwt("secret-test", 600, "p1", "demo", "u1", "demo:a", "both").unwrap();
         let c = decode_jwt("secret-test", &tok).unwrap();
         assert!(c.can_publish() && c.can_subscribe());
-        let (tok2, _) = create_jwt("secret-test", 600, "p1", "demo", "u1", "*", "subscribe").unwrap();
+        let (tok2, _) =
+            create_jwt("secret-test", 600, "p1", "demo", "u1", "*", "subscribe").unwrap();
         let c2 = decode_jwt("secret-test", &tok2).unwrap();
         assert!(!c2.can_publish() && c2.can_subscribe());
         assert!(decode_jwt("otra-secret", &tok).is_err());

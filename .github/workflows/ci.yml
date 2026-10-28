@@ -1,0 +1,216 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, security-hardening]
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Calidad (fmt, clippy, test, audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.ref }}-quality
+      cancel-in-progress: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Instalar toolchain Rust
+        uses: dtolnay/rust-toolchain@f08ac54821369508305fcb9e0121ec6e30ae9ada # 1.97.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache de Cargo
+        uses: Swatinem/rust-cache@aa7c1c80a07a27a84c0aa76d0cef0aad3830e330 # v2.7.8
+
+      - name: Formato
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (-D warnings)
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked --all-targets
+
+      - name: Verificar SHAs de actions
+        run: python3 scripts/verify_action_shas.py
+
+      - name: Shellcheck del deploy
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y shellcheck
+          shellcheck scripts/deploy.sh scripts/test_fail2ban.sh
+
+      - name: Documentación ejecutable
+        run: |
+          cargo build --locked
+          python3 scripts/test_docs_curl.py
+
+      - name: Instalar cargo-audit
+        run: cargo install cargo-audit --locked --version 0.22.2
+
+      - name: Auditoría de dependencias
+        run: cargo audit
+
+  sdk:
+    name: SDK (Node 24)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.ref }}-sdk
+      cancel-in-progress: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Instalar toolchain Rust
+        uses: dtolnay/rust-toolchain@f08ac54821369508305fcb9e0121ec6e30ae9ada # 1.97.0
+      - name: Cache de Cargo
+        uses: Swatinem/rust-cache@aa7c1c80a07a27a84c0aa76d0cef0aad3830e330 # v2.7.8
+      - name: Node 24
+        uses: actions/setup-node@0a44ba7841725637a19e28fa30b79a866c81b0a6 # v4.0.4
+        with:
+          node-version: "24"
+      - name: Compilar hub para tests
+        run: cargo build --locked
+      - name: Tests del SDK
+        run: node --test --test-force-exit sdk/js/test/sdk.test.mjs
+      - name: SDK — test node:sqlite aislado
+        env:
+          RUN_SQLITE_TEST: "1"
+        run: node --test --test-force-exit --test-name-pattern "DB caída" sdk/js/test/sdk.test.mjs
+
+  python:
+    name: Scripts (Python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.ref }}-python
+      cancel-in-progress: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Python 3.12
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+      - name: Tests de scripts
+        run: python -m unittest discover -s scripts -p "test_*.py" -v
+
+  docker:
+    name: Imagen Docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.ref }}-docker
+      cancel-in-progress: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Construir imagen
+        run: docker build -t socket-core:ci .
+
+      - name: Prueba de contenedor (sano)
+        run: |
+          set -e
+          sudo mkdir -p /tmp/sc-ci-data
+          sudo chown 10001:10001 /tmp/sc-ci-data
+          docker rm -f sc-ci >/dev/null 2>&1 || true
+          JWT=$(openssl rand -hex 32)
+          MASTER=$(openssl rand -hex 32)
+          docker run -d --name sc-ci --read-only --tmpfs /tmp \
+            --cap-drop ALL --security-opt no-new-privileges:true \
+            -p 127.0.0.1:13005:3005 -v /tmp/sc-ci-data:/app/data \
+            -e APP_ENV=dev -e JWT_SECRET="$JWT" -e MASTER_KEY="$MASTER" \
+            socket-core:ci
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:13005/health >/dev/null 2>&1 \
+              && docker exec sc-ci curl -fsS http://127.0.0.1:3015/health >/dev/null 2>&1; then
+              ok=1; break
+            fi
+            sleep 1
+          done
+          [ "$ok" = "1" ] || { docker logs sc-ci; exit 1; }
+          test "$(docker exec sc-ci id -u)" = "10001"
+          docker exec sc-ci sh -c 'test "$(wc -c < /app/socket-core)" -gt 5000000'
+          test "$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' sc-ci)" = "true"
+
+      - name: JWT_SECRET débil debe abortar
+        run: |
+          set -e
+          docker run --rm -e APP_ENV=dev -e JWT_SECRET=corta \
+            -e MASTER_KEY="$(openssl rand -hex 32)" socket-core:ci && exit 1 || true
+          # Verifica explícitamente el código 1
+          set +e
+          docker run --rm -e APP_ENV=dev -e JWT_SECRET=corta \
+            -e MASTER_KEY="$(openssl rand -hex 32)" socket-core:ci
+          code=$?
+          set -e
+          test "$code" = "1"
+
+      - name: Limpieza
+        if: always()
+        run: docker rm -f sc-ci >/dev/null 2>&1 || true
+
+  nginx:
+    name: Nginx (config y rutas)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.ref }}-nginx
+      cancel-in-progress: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Pruebas reales de nginx
+        run: python3 scripts/test_nginx.py
+
+  fail2ban:
+    name: fail2ban (filtro)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.ref }}-fail2ban
+      cancel-in-progress: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Instalar fail2ban
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y fail2ban
+      - name: Validar filtro
+        run: bash scripts/test_fail2ban.sh
+
+  deploy:
+    name: Despliegue al VPS
+    # needs: el deploy NO arranca si falla cualquier job.
+    needs: [quality, sdk, python, docker, nginx, fail2ban]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    environment:
+      name: production
+    steps:
+      - name: SSH Deploy to VPS
+        uses: appleboy/ssh-action@7eaf76671a0d7eec5d98ee897acda4f968735a17 # v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 25m
+          script: |
+            set -e
+            cd /srv/infra/socket-core
+            # Ejecuta el script versionado de origin/main (backup, rollback, nginx...).
+            git fetch origin main
+            git show origin/main:scripts/deploy.sh | bash -s

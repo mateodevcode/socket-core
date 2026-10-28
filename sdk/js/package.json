@@ -1,0 +1,12 @@
+{
+  "name": "@socket-core/sdk",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "SDK de socket-core (un fichero, sin dependencias)",
+  "main": "socket-core.mjs",
+  "exports": "./socket-core.mjs",
+  "engines": {
+    "node": ">=22"
+  }
+}
