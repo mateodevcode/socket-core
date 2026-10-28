@@ -324,7 +324,7 @@ test("renueva con solape y deduplica por id", { timeout: 40000 }, async () => {
   const hub = await setupHub(60); // JWT de 60s (mínimo)
   const statuses = [];
   const sdk = clientSdk(hub, "user-renew", {
-    _renewBeforeMs: 58_000, // renueva ~2s después de conectar
+    renewBeforeMs: 58_000, // renueva ~2s después de conectar
     _renewOverlapMs: 1500, // mantiene la vieja 1.5s tras el handshake de la nueva
   });
   sdk.on("status", (s) => statuses.push(s));
@@ -358,7 +358,7 @@ test("credential_revoked durante renovación => fatal (no bucle)", { timeout: 30
   const hub = await setupHub(60);
   const statuses = [];
   const sdk = clientSdk(hub, "user-renew-revoked", {
-    _renewBeforeMs: 58_000, // renueva ~2 s después de conectar
+    renewBeforeMs: 58_000, // renueva ~2 s después de conectar
   });
   sdk.on("status", (s) => statuses.push(s));
   try {
@@ -594,32 +594,51 @@ test("DB caída a mitad => server_error y reconecta cuando vuelve", { skip: proc
 
 // ---------- S3: una sola reconexión tras error+Close ----------
 
-test("rate_limited programa UNA sola reconexión (>=10s)", { timeout: 30000 }, async () => {
-  const hub = await setupHub();
-  const sdk = clientSdk(hub, "user-rl");
+test("rate_limited programa UNA sola reconexión (>=10s)", { timeout: 10000 }, async () => {
+  const origWS = globalThis.WebSocket;
+  const origSet = globalThis.setTimeout;
+  const origClear = globalThis.clearTimeout;
+  const sockets = [];
+  class FakeWS {
+    constructor(url) {
+      this.url = url;
+      this.readyState = 0;
+      sockets.push(this);
+      queueMicrotask(() => {
+        this.readyState = 1;
+        this.onopen?.();
+        this.onmessage?.({ data: JSON.stringify({ type: "welcome" }) });
+      });
+    }
+    send() {}
+    close() {
+      this.readyState = 3;
+    }
+  }
+  globalThis.WebSocket = FakeWS;
+  let sdk;
   try {
-    await waitStatus(sdk, "connected");
-    const origSet = globalThis.setTimeout;
-    const origClear = globalThis.clearTimeout;
+    sdk = connect({
+      url: "ws://fake.local/ws",
+      channel: CHANNEL,
+      initialJitterMs: 0,
+      tokenProvider: async () => ({ token: "jwt-falso", expires_in: 600 }),
+    });
+    await waitStatus(sdk, "connected", 2000);
+
     const timers = [];
-    // "Fake timers": capturamos los programados por el SDK sin ejecutarlos.
     globalThis.setTimeout = (fn, ms, ...args) => {
       timers.push({ fn, ms, args });
       return 9000 + timers.length;
     };
     globalThis.clearTimeout = () => {};
-    try {
-      for (let i = 0; i < 60; i++) {
-        try {
-          await sdk.publish({ type: "chat", seq: i });
-        } catch {}
-      }
-      // Espera con el timer REAL a que llegue el error y el Close del servidor.
-      await new Promise((r) => origSet(r, 900));
-    } finally {
-      globalThis.setTimeout = origSet;
-      globalThis.clearTimeout = origClear;
-    }
+
+    const sock = sockets.at(-1);
+    sock.onmessage({
+      data: JSON.stringify({ type: "error", code: "rate_limited", detail: "demasiadas" }),
+    });
+    sock.onclose({ code: 1005, reason: "" });
+
     const recon = timers.filter((t) => t.ms >= 500);
     assert.equal(
       recon.length,
@@ -628,8 +647,10 @@ test("rate_limited programa UNA sola reconexión (>=10s)", { timeout: 30000 }, a
     );
     assert.ok(recon[0].ms >= 10000, `rate_limited debe esperar >=10s: ${recon[0].ms}`);
   } finally {
-    sdk.close();
-    await hub.cleanup();
+    globalThis.WebSocket = origWS;
+    globalThis.setTimeout = origSet;
+    globalThis.clearTimeout = origClear;
+    sdk?.close();
   }
 });
 
