@@ -28,7 +28,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Concurrencia
-dashmap = "5.5"
+dashmap = "6.2"
 
 # Async utilities (split de WS de axum)
 futures-util = "0.3"
