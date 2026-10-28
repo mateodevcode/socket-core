@@ -4,6 +4,26 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 
 ## [Unreleased] — hardening (rama `security-hardening`)
 
+### Fase 8.11 — deploy robusto y restore SQLite seguro
+
+- **D1**: el rollback para el contenedor y elimina `-wal`/`-shm` antes de
+  restaurar la DB, evitando mezclar el WAL viejo con el backup.
+- **D2**: si falla el chequeo público, restaura la configuración de Nginx antes
+  de abortar.
+- **D3**: el helper de SQLite se extrae siempre a una ruta absoluta en
+  `BACKUP_DIR`, exista o no la DB.
+- **D4**: tras el fetch se usa `FETCH_HEAD` como target para `git show` y
+  `git reset`, tanto con ramas como con SHA.
+- **D5**: `flock` sobre `.deploy.lock`, limpieza de los `deploy-origin-*.sh`
+  propios y `docker image prune -f` solo tras un despliegue sano.
+- **D6**: en fallo de salud solo se muestran líneas
+  `WARN|ERROR|FATAL|configuración|panic`, como máximo 30.
+- **D7**: CI ejecuta el deploy desde un fichero temporal con permisos `700`,
+  comprueba `test -s` y usa `set -euo pipefail`; ya no canaliza a `bash`.
+- **D8**: `sqlite_backup.py restore` valida integridad antes y después,
+  conserva `.antes-restore`, elimina sidecars, usa `os.replace` atómico y exige
+  `--force`/`--create` cuando corresponde.
+
 ### Fase 8.10 — informe final, rate por IP configurable y rotación pendiente
 
 - **W1**: `docs/INFORME-FINAL.md` con la tabla completa de hallazgos

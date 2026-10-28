@@ -19,12 +19,22 @@ FAIL2BAN_FILTER="${FAIL2BAN_FILTER:-/etc/fail2ban/filter.d}"
 FAIL2BAN_JAIL="${FAIL2BAN_JAIL:-/etc/fail2ban/jail.d}"
 MAX_HEALTH_ATTEMPTS="${MAX_HEALTH_ATTEMPTS:-30}"
 HEALTH_SLEEP="${HEALTH_SLEEP:-2}"
+PUBLIC_HEALTH_SLEEP="${PUBLIC_HEALTH_SLEEP:-2}"
 SKIP_CERTBOT="${SKIP_CERTBOT:-0}"
 
 log() { echo "→ $*"; }
 fail() { echo "❌ $*" >&2; exit 1; }
 
 cd "$ROOT"
+ROOT="$(pwd)"
+
+# Un solo despliegue a la vez en este ROOT. El hijo de re-ejecución hereda el
+# lock del padre y no debe intentar adquirirlo otra vez.
+if [ "${DEPLOY_REEXEC:-0}" != "1" ]; then
+  exec 9>"$ROOT/.deploy.lock"
+  flock -n 9 || fail "otro despliegue en curso (lock $ROOT/.deploy.lock)"
+fi
+
 STAMP="$(date +%Y%m%d-%H%M%S)"
 PREV="$(git rev-parse HEAD)"
 log "Commit previo: $PREV"
@@ -33,6 +43,9 @@ log "Ref a desplegar: $REF"
 # R12: el fetch es SIEMPRE lo primero que puede fallar. Si falla, no se toca ni
 # .last_good_commit, ni backups, ni el working tree, ni el contenedor.
 git fetch origin "$REF" || fail "git fetch origin $REF falló; no se ha modificado nada"
+TARGET="$(git rev-parse FETCH_HEAD)" || fail "no se pudo resolver FETCH_HEAD"
+[ -n "$TARGET" ] || fail "FETCH_HEAD está vacío"
+log "Commit a desplegar: $TARGET"
 
 # Primer despliegue: no existe .last_good_commit. Se inicializa con el HEAD
 # ANTERIOR al fetch para que, si este primer intento falla en salud, el rollback
@@ -43,26 +56,35 @@ if [ ! -f .last_good_commit ]; then
 fi
 
 mkdir -p "$BACKUP_DIR"
+BACKUP_DIR="$(cd "$BACKUP_DIR" && pwd)"
 # Si el script de origin difiere del que se está ejecutando, re-ejecuta el nuevo
 # (protege invocaciones manuales de una versión vieja).
-NUEVO="$BACKUP_DIR/deploy-origin-$STAMP.sh"
-git show "origin/$REF:scripts/deploy.sh" > "$NUEVO" \
-  || fail "no se pudo obtener scripts/deploy.sh de origin/$REF"
+NUEVO="$BACKUP_DIR/deploy-origin-$STAMP-$$.sh"
+cleanup() { if [ -n "${NUEVO:-}" ]; then rm -f "$NUEVO"; fi; }
+trap cleanup EXIT INT TERM
+git show "$TARGET:scripts/deploy.sh" > "$NUEVO" \
+  || fail "no se pudo obtener scripts/deploy.sh de $TARGET"
 chmod 700 "$NUEVO"
 if [ "${DEPLOY_REEXEC:-0}" != "1" ] && ! cmp -s "$NUEVO" "${BASH_SOURCE[0]:-}"; then
   log "El script de origin difiere del actual; re-ejecutando el nuevo"
-  DEPLOY_REEXEC=1 exec bash "$NUEVO"
+  set +e
+  DEPLOY_REEXEC=1 bash "$NUEVO"
+  rc=$?
+  set -e
+  exit "$rc"
 fi
 rm -f "$NUEVO"
+NUEVO=""
+
+# El helper SIEMPRE se extrae a un fichero absoluto en BACKUP_DIR, exista o no
+# la DB. Así el rollback nunca depende del working tree ni de una ruta relativa.
+HELPER="$BACKUP_DIR/sqlite_backup.py"
+git show "$TARGET:scripts/sqlite_backup.py" > "$HELPER" \
+  || fail "no se pudo obtener scripts/sqlite_backup.py de $TARGET"
+chmod 700 "$HELPER"
 
 # ---------- R4: backup consistente de SQLite (API backup + integrity_check) ----------
 if [ -f "$DB_FILE" ]; then
-  HELPER="scripts/sqlite_backup.py"
-  if [ ! -f "$HELPER" ]; then
-    HELPER="$BACKUP_DIR/sqlite_backup.py"
-    git show "origin/$REF:scripts/sqlite_backup.py" > "$HELPER" \
-      || fail "no se pudo obtener scripts/sqlite_backup.py"
-  fi
   log "Backup consistente de SQLite: data-$STAMP.db"
   $SUDO python3 "$HELPER" backup --db "$DB_FILE" --out "$BACKUP_DIR/data-$STAMP.db" \
     || fail "backup de SQLite falló (integridad)"
@@ -76,8 +98,8 @@ fi
 git reset --hard HEAD >/dev/null 2>&1 || true
 git clean -fd -e proyectos/ -e .env -e data/ -e backups/ -e .last_good_commit >/dev/null 2>&1 || true
 $SUDO chown -R 10001:10001 data 2>/dev/null || true
-log "Actualizando a origin/$REF"
-git reset --hard "origin/$REF"
+log "Actualizando a $TARGET"
+git reset --hard "$TARGET"
 
 [ -f .env ] || fail "Falta .env en $ROOT (cópialo una vez, no se versiona)"
 
@@ -132,11 +154,15 @@ restore_db() {
 # ---------- R2: rollback SOLO al último commit sano ----------
 if ! wait_health; then
   log "Salud falló. Rollback..."
-  docker compose logs --tail=120 socket-core || true
+  docker compose logs --tail=500 socket-core 2>&1 \
+    | grep -E 'WARN|ERROR|FATAL|configuración|panic' \
+    | tail -n 30 || true
   LAST_GOOD="$(cat .last_good_commit 2>/dev/null || true)"
   if [ -n "$LAST_GOOD" ]; then
     log "Volviendo a .last_good_commit=$LAST_GOOD"
     git reset --hard "$LAST_GOOD"
+    docker compose stop socket-core || true
+    $SUDO rm -f "$DB_FILE-wal" "$DB_FILE-shm" || true
     restore_db
     docker compose build socket-core || true
     docker compose up -d --remove-orphans || true
@@ -236,11 +262,15 @@ OK=0
 for i in 1 2 3 4 5 6; do
   if curl -f --max-time 10 "$PUBLIC_URL/health"; then OK=1; break; fi
   echo "→ intento $i falló, reintentando..."
-  sleep 2
+  sleep "$PUBLIC_HEALTH_SLEEP"
 done
-[ "$OK" = "1" ] || fail "el chequeo público falló; .last_good_commit NO se actualiza"
+if [ "$OK" != "1" ]; then
+  restore_nginx
+  fail "el chequeo público falló; configuración de Nginx restaurada y .last_good_commit NO se actualiza"
+fi
 
 DEPLOYED="$(git rev-parse HEAD)"
 echo "$DEPLOYED" > .last_good_commit
 log "Deploy OK. .last_good_commit=$DEPLOYED"
 docker compose ps || true
+docker image prune -f || true

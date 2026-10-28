@@ -141,17 +141,17 @@ coinciden con el `CHANGELOG.md`. Solo R10 queda abierto y está acotado en
 
 ## 3. Tests y CI (W3)
 
-Los **42 tests de Python** de `unittest discover` se reparten así:
+Los **58 tests de Python** de `unittest discover` se reparten así:
 
 | Fichero | Tests | Job de CI |
 |---|---:|---|
 | `scripts/test_alta_cliente.py` | 13 | `python` |
-| `scripts/test_deploy.py` | 9 | `python` |
+| `scripts/test_deploy.py` | 19 | `python` |
 | `scripts/test_preflight.py` | 12 | `python` |
 | `scripts/test_smoke.py` | 3 | `python` |
-| `scripts/test_sqlite_backup.py` | 3 | `python` |
+| `scripts/test_sqlite_backup.py` | 9 | `python` |
 | `scripts/test_estado.py` | 2 | `python` |
-| **Total** | **42** | **`python`** |
+| **Total** | **58** | **`python`** |
 
 Pruebas que no son casos `unittest` y se ejecutan en su propio job:
 

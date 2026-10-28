@@ -209,8 +209,14 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           command_timeout: 25m
           script: |
-            set -e
+            set -euo pipefail
             cd /srv/infra/socket-core
             # Ejecuta el script versionado de origin/main (backup, rollback, nginx...).
             git fetch origin main
-            git show origin/main:scripts/deploy.sh | bash -s
+            DEPLOY_TMP=""
+            trap 'rm -f "$DEPLOY_TMP"' EXIT
+            DEPLOY_TMP="$(mktemp /tmp/socket-core-deploy.XXXXXX.sh)"
+            git show origin/main:scripts/deploy.sh > "$DEPLOY_TMP"
+            chmod 700 "$DEPLOY_TMP"
+            test -s "$DEPLOY_TMP"
+            "$DEPLOY_TMP"
