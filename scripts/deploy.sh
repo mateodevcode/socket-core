@@ -274,3 +274,4 @@ echo "$DEPLOYED" > .last_good_commit
 log "Deploy OK. .last_good_commit=$DEPLOYED"
 docker compose ps || true
 docker image prune -f || true
+docker builder prune -f --filter until=168h || true

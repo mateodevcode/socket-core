@@ -117,7 +117,9 @@ export async function tokenFromEndpoint(url, init = {}) {
     try {
       detalle = String((await r.json())?.error ?? "");
     } catch {}
-    const e = new Error(`token endpoint ${r.status}${detalle ? `: ${detalle}` : ""}`);
+    const e = new Error(
+      `token endpoint ${r.status}${detalle ? `: ${detalle}` : ""}`,
+    );
     e.status = r.status;
     throw e;
   }
@@ -125,7 +127,13 @@ export async function tokenFromEndpoint(url, init = {}) {
   if (!j || typeof j.token !== "string" || !j.token) {
     throw new Error("el endpoint no devolvió { token, expires_in }");
   }
-  return { token: j.token, expires_in: j.expires_in };
+  return {
+    token: j.token,
+    expires_in: j.expires_in,
+    channel: j.channel,
+    url: j.url,
+    role: j.role,
+  };
 }
 
 /** Estrategia ante errores de tokenProvider: 401/403 => fatal; red/5xx => reintentar. */
@@ -149,7 +157,8 @@ export function _classifyTokenError(err) {
  */
 export function connect(options = {}) {
   const tokenProvider = options.tokenProvider;
-  if (typeof tokenProvider !== "function") throw new Error("tokenProvider es obligatorio");
+  if (typeof tokenProvider !== "function")
+    throw new Error("tokenProvider es obligatorio");
   if (!options.channel) throw new Error("channel es obligatorio");
   const wsUrl = normalizeWsUrl(options.url);
 
@@ -200,7 +209,10 @@ export function connect(options = {}) {
   let tokenChain = Promise.resolve();
   function getToken() {
     const run = async () => {
-      const wait = Math.max(0, state.lastTokenAt + _MIN_TOKEN_INTERVAL_MS - Date.now());
+      const wait = Math.max(
+        0,
+        state.lastTokenAt + _MIN_TOKEN_INTERVAL_MS - Date.now(),
+      );
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
       state.lastTokenAt = Date.now();
       const t = await tokenProvider();
@@ -234,7 +246,12 @@ export function connect(options = {}) {
     const sock = { ws, mode, ready: false, tokenInfo };
     ws.onopen = () => {
       try {
-        ws.send(JSON.stringify({ channel: options.channel, ...(options.device ? { device: options.device } : {}) }));
+        ws.send(
+          JSON.stringify({
+            channel: options.channel,
+            ...(options.device ? { device: options.device } : {}),
+          }),
+        );
       } catch {
         try {
           ws.close();
@@ -310,7 +327,9 @@ export function connect(options = {}) {
       // conexión sigue viva (no son fallos de credencial/canal).
       if (
         sock.ready &&
-        (code === "forbidden" || code === "invalid_payload" || code === "message_too_large")
+        (code === "forbidden" ||
+          code === "invalid_payload" ||
+          code === "message_too_large")
       ) {
         emit("publish_error", { code, detail: msg.detail });
         return;
@@ -397,7 +416,10 @@ export function connect(options = {}) {
   function scheduleRenewal(sock) {
     if (state.closed || state.fatal) return;
     if (state.renewTimer) clearTimeout(state.renewTimer);
-    const ttlMs = Math.max(1000, Number(sock.tokenInfo.expires_in || 600) * 1000);
+    const ttlMs = Math.max(
+      1000,
+      Number(sock.tokenInfo.expires_in || 600) * 1000,
+    );
     const before = Math.max(0, options.renewBeforeMs ?? _pickRenewBeforeMs());
     const delay = Math.max(0, ttlMs - before);
     state.renewTimer = setTimeout(() => renew(sock), delay);
@@ -412,7 +434,13 @@ export function connect(options = {}) {
   }
 
   async function renew(oldSock) {
-    if (state.closed || state.fatal || oldSock !== state.active || state.candidate) return;
+    if (
+      state.closed ||
+      state.fatal ||
+      oldSock !== state.active ||
+      state.candidate
+    )
+      return;
     setStatus("renewing");
     let tokenInfo;
     try {
@@ -497,7 +525,10 @@ export function connect(options = {}) {
   // Jitter inicial: muchos clientes abriendo a la vez no piden token en el mismo ms.
   const jitterMax = Math.max(
     0,
-    Math.min(_INITIAL_JITTER_MAX_ALLOWED_MS, options.initialJitterMs ?? _INITIAL_JITTER_MAX_MS),
+    Math.min(
+      _INITIAL_JITTER_MAX_ALLOWED_MS,
+      options.initialJitterMs ?? _INITIAL_JITTER_MAX_MS,
+    ),
   );
   setTimeout(connectOnce, Math.random() * jitterMax);
   return api;

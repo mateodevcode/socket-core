@@ -4,6 +4,16 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 
 ## [Unreleased] — hardening (rama `security-hardening`)
 
+### Hardening — fail2ban en Ubuntu 24.04 y disco del VPS
+
+- **Fail2ban**: el jail `socketcore-auth` fuerza `backend = auto` para que
+  Ubuntu 24.04 no ignore `logpath` al usar systemd.
+- **Estado**: `estado.py` exige que `fail2ban-client status socketcore-auth`
+  muestre una `File list` no vacía; un jail sin logs ya no da OK.
+- **Deploy**: tras un despliegue sano se ejecuta
+  `docker builder prune -f --filter until=168h`, además del prune de imágenes.
+- **Docs**: `COMO-FUNCIONA.md` recuerda vigilar el disco con `docker system df`.
+
 ### Fase 8.11 — deploy robusto y restore SQLite seguro
 
 - **D1**: el rollback para el contenedor y elimina `-wal`/`-shm` antes de

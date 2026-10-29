@@ -389,6 +389,7 @@ class TestDeploy(unittest.TestCase):
         calls = self.s.calls()
         self.assertTrue(any(c.startswith("flock ") for c in calls), calls)
         self.assertIn("docker image prune -f", calls)
+        self.assertIn("docker builder prune -f --filter until=168h", calls)
         self.assertEqual(list((self.s.root / "backups").glob("deploy-origin-*.sh")), [])
 
     def test_flock_fallido_aborta_sin_efectos(self):
@@ -404,6 +405,7 @@ class TestDeploy(unittest.TestCase):
         r = self.s.run({"FAKE_HEALTH_FAIL": "1"})
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertNotIn("docker image prune -f", self.s.calls())
+        self.assertNotIn("docker builder prune -f --filter until=168h", self.s.calls())
         self.assertEqual(list((self.s.root / "backups").glob("deploy-origin-*.sh")), [])
 
     def test_logs_de_salud_filtrados_y_limitados(self):

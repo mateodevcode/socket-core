@@ -194,6 +194,42 @@ def check_trusted_proxies() -> bool:
     return False
 
 
+def _fail2ban_file_list(salida: str) -> list[str]:
+    archivos: list[str] = []
+    capturando = False
+    for linea in salida.splitlines():
+        limpio = linea.strip()
+        if "File list:" in limpio:
+            capturando = True
+            resto = limpio.split("File list:", 1)[1].strip()
+            if resto:
+                archivos.append(resto)
+            continue
+        if not capturando or not limpio:
+            continue
+        if limpio.startswith(("|-", "`-")) or ":" in limpio:
+            break
+        candidato = limpio.lstrip("|").strip()
+        if candidato:
+            archivos.append(candidato)
+    return archivos
+
+
+def evaluar_fail2ban(salida: str) -> tuple[bool, str]:
+    archivos = _fail2ban_file_list(salida)
+    if not archivos:
+        return False, "File list vacía: el jail no monitoriza ningún log"
+    estado = [
+        linea.strip()
+        for linea in salida.splitlines()
+        if "Currently failed" in linea or "Currently banned" in linea
+    ]
+    detalle = "; ".join(estado)
+    if detalle:
+        detalle += "; "
+    return True, detalle + "File list: " + ", ".join(archivos)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Estado del hub socket-core")
     ap.add_argument("--core", default=default_core())
@@ -288,12 +324,18 @@ def main() -> int:
         else:
             pintar(True, "cert (core sin TLS local, omitido)")
 
-        r = sh("sudo -n fail2ban-client status socketcore-auth 2>&1 | grep -E 'Currently (failed|banned)'")
-        if r and r.returncode == 0 and r.stdout.strip():
-            pintar(True, "fail2ban socketcore-auth", r.stdout.strip().replace("\n", " ").replace("\t", " "))
-        else:
+        r = sh("sudo -n fail2ban-client status socketcore-auth 2>&1")
+        if not r or r.returncode != 0:
             pintar(False, "fail2ban socketcore-auth", "sin datos (¿sudo sin password?)")
             alertas.append("fail2ban sin verificar")
+        else:
+            salida = (r.stdout or "") + (r.stderr or "")
+            ok, detalle = evaluar_fail2ban(salida)
+            if ok:
+                pintar(True, "fail2ban socketcore-auth", detalle)
+            else:
+                pintar(False, "fail2ban socketcore-auth", detalle)
+                alertas.append("fail2ban sin verificar")
 
     print("")
     if alertas:

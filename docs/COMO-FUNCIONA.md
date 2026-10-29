@@ -465,6 +465,21 @@ fail2ban y `TRUSTED_PROXIES`.
 - `scripts/estado.py` resume salud, stats por proyecto, Nginx, cert, fail2ban y
   coherencia de `TRUSTED_PROXIES`.
 
+### 7.5 Disco en el VPS
+
+En un VPS con Docker hay que vigilar el disco: imágenes viejas, caché de build y
+volúmenes huérfanos pueden llenar `/var/lib/docker` y tumbar el hub. Revisa el uso
+con:
+
+```bash
+docker system df
+docker system df -v
+```
+
+El deploy ya ejecuta `docker image prune -f` y
+`docker builder prune -f --filter until=168h` tras un despliegue sano, pero
+conviene revisar también los volúmenes huérfanos y el espacio libre del VPS.
+
 ---
 
 ## 8. Checklist para integrar una app nueva (10 minutos)

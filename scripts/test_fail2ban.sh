@@ -4,6 +4,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG="$ROOT/fail2ban/test/sample.log"
 FILTER="$ROOT/fail2ban/filter.d/socketcore-auth.conf"
+JAIL="$ROOT/fail2ban/jail.d/socketcore-auth.conf"
+
+if ! grep -Eq '^[[:space:]]*backend[[:space:]]*=[[:space:]]*auto[[:space:]]*$' "$JAIL"; then
+    echo "❌ falta 'backend = auto' en $JAIL (Ubuntu 24.04 usaría systemd y el logpath se ignora)" >&2
+    exit 1
+fi
 
 OUT="$(fail2ban-regex "$LOG" "$FILTER" --print-all-matched)"
 printf '%s\n' "$OUT"
@@ -27,4 +33,4 @@ if [ "$(printf '%s\n' "$MATCHED" | grep -cE '" (401|403) [0-9]+ ')" -ne 2 ]; the
     echo "❌ las 2 coincidencias no son 401/403" >&2
     exit 1
 fi
-echo "✅ fail2ban-regex OK: 2 coincidencias (401/403), 200/429/tricky fuera"
+echo "✅ fail2ban OK: backend auto y fail2ban-regex con 2 coincidencias (401/403), 200/429/tricky fuera"
