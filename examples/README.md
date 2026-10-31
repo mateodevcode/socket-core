@@ -63,8 +63,12 @@ npm install
 SOCKET_API_KEY=sc_live_... SOCKET_CORE_URL=http://127.0.0.1:3005 npm start
 ```
 
-Abre <http://127.0.0.1:8080>, escribe un nombre y entra. Abre otra pestaña con otro
-nombre para ver presencia y mensajes en el mismo canal.
+Abre <http://127.0.0.1:8080> (redirige a `/chat.html`), escribe un nombre y entra.
+Abre otra pestaña con otro nombre para ver presencia y mensajes en el mismo canal.
+
+> El nombre que se pinta en cada mensaje (`from`) lo envía el cliente: **no es una
+> identidad verificada**. La identidad real es el `sub` del JWT (el servidor la usa
+> en `source`); no uses `payload.from` para permisos.
 
 ## Variables del ejemplo
 

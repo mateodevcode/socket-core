@@ -108,7 +108,8 @@ export class _RecentIds {
 /**
  * Pide un JWT al backend del proyecto. Si la respuesta no es 2xx lanza Error con
  * `.status` (401/403 => el SDK lo trata como fatal; 5xx/red => reintenta).
- * Devuelve { token, expires_in }.
+ * Devuelve { token, expires_in, channel, url, role } tal cual los mande el
+ * endpoint (channel/url son los que necesita el chat de ejemplo para conectar).
  */
 export async function tokenFromEndpoint(url, init = {}) {
   const r = await fetch(url, { credentials: "same-origin", ...init });

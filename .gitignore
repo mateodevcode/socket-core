@@ -16,3 +16,4 @@ backups/
 node_modules/
 .last_good_commit
 credenciales-*.txt
+operador-*.txt

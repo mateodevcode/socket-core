@@ -161,7 +161,7 @@ Pruebas que no son casos `unittest` y se ejecutan en su propio job:
 | `scripts/test_nginx.py` | `nginx` | Nginx real en Docker |
 | `scripts/test_fail2ban.sh` | `fail2ban` | 2 coincidencias 401/403 |
 | `scripts/verify_action_shas.py` | `quality` | Todos los SHA coinciden |
-| `sdk/js/test/sdk.test.mjs` | `sdk` | 22 pasan, 1 skip (`node:sqlite`) |
+| `sdk/js/test/sdk.test.mjs` | `sdk` | 26 pasan, 1 skip (`node:sqlite`) |
 
 `test_docs_curl.py` y `test_nginx.py` también son importados por
 `unittest discover` (0 casos); su ejecución real es la de la tabla anterior.

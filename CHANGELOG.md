@@ -4,15 +4,24 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 
 ## [Unreleased] — hardening (rama `security-hardening`)
 
-### Hardening — fail2ban en Ubuntu 24.04 y disco del VPS
+### Fase 8.12 — SDK del ejemplo, fail2ban y presencia
 
-- **Fail2ban**: el jail `socketcore-auth` fuerza `backend = auto` para que
-  Ubuntu 24.04 no ignore `logpath` al usar systemd.
+- **SDK**: `tokenFromEndpoint` conserva `{ token, expires_in, channel, url, role }`
+  (`channel`/`url` se descartaban y rompían el chat de ejemplo). Test de flujo real
+  con el backend de ejemplo + hub + SDK.
+- **Fail2ban**: el jail `socketcore-auth` fuerza `backend = auto` para que Ubuntu
+  24.04 no ignore `logpath` al usar systemd; `test_fail2ban.sh` falla si falta.
 - **Estado**: `estado.py` exige que `fail2ban-client status socketcore-auth`
   muestre una `File list` no vacía; un jail sin logs ya no da OK.
 - **Deploy**: tras un despliegue sano se ejecuta
   `docker builder prune -f --filter until=168h`, además del prune de imágenes.
-- **Docs**: `COMO-FUNCIONA.md` recuerda vigilar el disco con `docker system df`.
+- **Ejemplo**: `/` redirige a `/chat.html` y la presencia se reinicia al reconectar
+  (los `connection_id` viejos tras reiniciar el hub ya no cuentan).
+- **Docs**: pruebas de auth desde tu propia IP (fail2ban/ufw banea todos los
+  puertos y cómo liberarte), identidad real vs. `from` del chat de ejemplo y disco
+  en el VPS (`docker system df`).
+- **Higiene**: `.gitignore`/`.dockerignore` bloquean `credenciales-*.txt` y
+  `operador-*.txt`; test en `tests/docker_context.rs`.
 
 ### Fase 8.11 — deploy robusto y restore SQLite seguro
 

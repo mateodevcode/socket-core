@@ -164,6 +164,57 @@ async function setupHub(jwtTtl = 600) {
   };
 }
 
+async function waitServer(url, ms = 10000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    try {
+      await fetch(url, { redirect: "manual" });
+      return true;
+    } catch {}
+    await sleep(100);
+  }
+  return false;
+}
+
+async function startExample(hub) {
+  const port = await freePort();
+  const base = `http://127.0.0.1:${port}`;
+  const env = {
+    ...process.env,
+    SOCKET_CORE_URL: `http://127.0.0.1:${hub.port}`,
+    SOCKET_PUBLIC_URL: `ws://127.0.0.1:${hub.port}`,
+    SOCKET_API_KEY: hub.rawKey,
+    SOCKET_CHANNEL: CHANNEL,
+    PORT: String(port),
+  };
+  const child = spawn(
+    process.execPath,
+    [join(ROOT, "examples", "backend", "server.mjs")],
+    { env, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let stderr = "";
+  child.stderr.on("data", (d) => (stderr += d.toString()));
+  child.stdout.resume();
+  const ok = await waitServer(`${base}/`);
+  if (!ok) {
+    child.kill();
+    throw new Error(`el backend del ejemplo no arrancó. stderr: ${stderr.slice(-800)}`);
+  }
+  return { base, child, stderr: () => stderr };
+}
+
+async function exampleLogin(base, name) {
+  const r = await fetch(`${base}/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  assert.equal(r.status, 200, `login ${r.status}`);
+  const cookie = (r.headers.get("set-cookie") || "").split(";")[0];
+  assert.ok(cookie, "el login debe devolver cookie");
+  return { cookie, user: (await r.json()).user };
+}
+
 function clientSdk(hub, userId, opts = {}) {
   return connect({
     url: `ws://127.0.0.1:${hub.port}/ws`,
@@ -667,6 +718,32 @@ async function stubHttp(handler) {
   };
 }
 
+test("tokenFromEndpoint conserva token, expires_in, channel, url y role", async () => {
+  const stub = await stubHttp((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(
+      JSON.stringify({
+        token: "jwt-de-prueba",
+        expires_in: 123,
+        channel: "t:chat",
+        url: "wss://hub.example",
+        role: "both",
+      }),
+    );
+  });
+  try {
+    assert.deepEqual(await tokenFromEndpoint(stub.url), {
+      token: "jwt-de-prueba",
+      expires_in: 123,
+      channel: "t:chat",
+      url: "wss://hub.example",
+      role: "both",
+    });
+  } finally {
+    await stub.close();
+  }
+});
+
 test("tokenFromEndpoint 401 => fatal sin reintentos", { timeout: 20000 }, async () => {
   const stub = await stubHttp((_req, res) => {
     res.writeHead(401, { "content-type": "application/json" });
@@ -746,6 +823,30 @@ test("presencia por Set de connection_id: el solape no marca offline", async () 
   assert.equal(t.count("u1"), 0);
 });
 
+test("presencia: reset descarta conexiones viejas tras reiniciar el hub", async () => {
+  const { createPresenceTracker } = await import("../../../examples/frontend/presence.mjs");
+  const t = createPresenceTracker();
+  t.seed([
+    { user: "u1", connection_id: "vieja-1" },
+    { user: "u1", connection_id: "vieja-2" },
+  ]);
+  assert.equal(t.count("u1"), 2);
+  t.reset();
+  assert.equal(t.count("u1"), 0, "reset debe vaciar la presencia local");
+  t.seed([{ user: "u1", connection_id: "nueva" }]);
+  assert.equal(t.count("u1"), 1, "solo cuenta la conexión real tras reiniciar");
+  const r = t.apply({ type: "client_left", user: "u1", connection_id: "vieja-1" });
+  assert.equal(r.online, true);
+  assert.equal(r.connections, 1, "un left de una conexión vieja no descuadra");
+});
+
+test("chat.html reinicia la presencia al reconectar", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const html = await readFile(join(ROOT, "examples", "frontend", "chat.html"), "utf8");
+  assert.match(html, /presencia\.reset\(\)/, "chat.html debe resetear la presencia");
+  assert.match(html, /s === "reconnecting"/, "el reset debe ocurrir al reconectar");
+});
+
 // ---------- S7: autorización explícita del backend de ejemplo ----------
 
 test("canAccess exige sesión y canal permitido", async () => {
@@ -753,6 +854,75 @@ test("canAccess exige sesión y canal permitido", async () => {
   assert.equal(canAccess(null, "demo:chat", "demo:chat"), false);
   assert.equal(canAccess({ id: "u1" }, "otro:chat", "demo:chat"), false);
   assert.equal(canAccess({ id: "u1" }, "demo:chat", "demo:chat"), true);
+});
+
+// ---------- Flujo real del ejemplo (backend Express + SDK) ----------
+
+test("flujo real del ejemplo: / redirige y tokenFromEndpoint permite conectar el chat", { timeout: 60000 }, async () => {
+  const hub = await setupHub();
+  const ex = await startExample(hub);
+  const sdks = [];
+  try {
+    const a = await exampleLogin(ex.base, "ana");
+    const b = await exampleLogin(ex.base, "bea");
+
+    const redirect = await fetch(`${ex.base}/`, { redirect: "manual" });
+    assert.equal(redirect.status, 302, "GET / debe redirigir");
+    assert.equal(redirect.headers.get("location"), "/chat.html");
+
+    const ta = await tokenFromEndpoint(`${ex.base}/socket-token`, {
+      method: "POST",
+      headers: { cookie: a.cookie },
+    });
+    assert.equal(ta.channel, CHANNEL, "tokenFromEndpoint debe conservar channel");
+    assert.equal(ta.url, `ws://127.0.0.1:${hub.port}`, "tokenFromEndpoint debe conservar url");
+    assert.equal(typeof ta.token, "string");
+    assert.ok(ta.token.length > 0);
+    assert.equal(typeof ta.expires_in, "number");
+
+    const tb = await tokenFromEndpoint(`${ex.base}/socket-token`, {
+      method: "POST",
+      headers: { cookie: b.cookie },
+    });
+
+    const make = (first, cookie) => {
+      let usado = false;
+      const sdk = connect({
+        url: first.url,
+        channel: first.channel,
+        device: "example-test",
+        tokenProvider: async () => {
+          if (!usado) {
+            usado = true;
+            return { token: first.token, expires_in: first.expires_in };
+          }
+          return tokenFromEndpoint(`${ex.base}/socket-token`, {
+            method: "POST",
+            headers: { cookie },
+          });
+        },
+      });
+      sdks.push(sdk);
+      return sdk;
+    };
+    const sa = make(ta, a.cookie);
+    const sb = make(tb, b.cookie);
+    const recibidos = [];
+    sb.on("message", (m) => {
+      if (m.payload?.text === "hola-ejemplo") recibidos.push(m);
+    });
+    await waitStatus(sa, "connected");
+    await waitStatus(sb, "connected");
+    await sa.publish({ type: "chat", text: "hola-ejemplo", from: a.user.name });
+    const ok = await waitFor(() => recibidos.length > 0, 8000);
+    assert.ok(ok, "el chat del ejemplo debe entregar el mensaje");
+  } finally {
+    for (const sdk of sdks) sdk.close();
+    try {
+      ex.child.kill();
+    } catch {}
+    await hub.cleanup();
+  }
 });
 
 // ---------- S8b: jitter en el primer connect ----------

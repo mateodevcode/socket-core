@@ -194,6 +194,11 @@ Salida real del receptor:
 
 `source` lo impone el servidor como `proyecto:sub` (no se puede falsificar por WS).
 
+> En el **chat de ejemplo**, el nombre visible de cada mensaje (`payload.from`) lo
+> envía el cliente y no está verificado: úsalo solo para pintar. La identidad real
+> es el `sub` del JWT (lo que el servidor pone en `source`); no bases permisos en
+> `payload.from`.
+
 Alternativa backend (REST con API key; para publicar por REST con JWT, el rol debe
 incluir `publish`):
 
@@ -479,6 +484,27 @@ docker system df -v
 El deploy ya ejecuta `docker image prune -f` y
 `docker builder prune -f --filter until=168h` tras un despliegue sano, pero
 conviene revisar también los volúmenes huérfanos y el espacio libre del VPS.
+
+### 7.6 Probar auth desde tu IP: fail2ban y cómo liberarte
+
+Cada `401/403` del log de Nginx cuenta para el jail `socketcore-auth` (`maxretry =
+30` en `findtime = 300` ⇒ baneo de 1 h). Si pruebas API keys falsas desde tu
+propia IP, puedes acabar baneado tú mismo. Con `banaction = ufw` (habitual en
+Ubuntu) el baneo es `deny from <IP>` y corta **todos los puertos**, no solo
+80/443: también tu SSH.
+
+Para liberarte:
+
+```bash
+sudo fail2ban-client status socketcore-auth          # File list + IPs baneadas
+sudo fail2ban-client set socketcore-auth unbanip TU_IP
+sudo ufw status numbered                             # comprueba si queda el deny
+# sudo ufw delete <número>
+```
+
+Mientras desarrollas, prueba desde otra IP o añade la tuya a `ignoreip` en
+`fail2ban/jail.d/socketcore-auth.conf`. Los `429` de rate limit **no** cuentan
+para el baneo.
 
 ---
 

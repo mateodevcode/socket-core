@@ -105,19 +105,27 @@
           tokenProvider,
         });
 
+        // Presencia por Set de connection_id (sembrada por /presence): la
+        // renovación con solape no debe marcar al usuario como desconectado.
+        // Tras un reinicio del hub los ids viejos dejan de existir: al pasar a
+        // "reconnecting" se vacía y, al volver "connected", se resiembra.
+        const presencia = createPresenceTracker();
+        async function refrescarPresencia() {
+          presencia.reset();
+          try {
+            const r = await fetch("/presence");
+            if (r.ok) presencia.seed((await r.json()).connections);
+          } catch {}
+        }
         sc.on("status", (s) => {
           estado.textContent = `estado: ${s}`;
+          if (s === "reconnecting") presencia.reset();
+          else if (s === "connected") refrescarPresencia();
         });
         sc.on("fatal", (f) => {
           fatal.textContent = `conexión terminada: ${f.code} — ${f.detail || ""}`;
         });
-        // Presencia por Set de connection_id (sembrada por /presence): la
-        // renovación con solape no debe marcar al usuario como desconectado.
-        const presencia = createPresenceTracker();
-        fetch("/presence")
-          .then((r) => (r.ok ? r.json() : { connections: [] }))
-          .then((j) => presencia.seed(j.connections))
-          .catch(() => {});
+        refrescarPresencia();
         sc.on("presence", (p) => {
           const estado = presencia.apply(p);
           if (!estado.user) return;

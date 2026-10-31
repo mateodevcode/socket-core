@@ -25,6 +25,18 @@ fn gitattributes_fuerza_lf_en_scripts() {
 }
 
 #[test]
+fn gitignore_bloquea_credenciales_y_fichas_de_operador() {
+    let g = std::fs::read_to_string(".gitignore").expect(".gitignore debe existir");
+    for pat in ["credenciales-*.txt", "operador-*.txt"] {
+        assert!(
+            g.lines().any(|l| l.trim() == pat),
+            ".gitignore debe ignorar {} para no commitear secretos por error",
+            pat
+        );
+    }
+}
+
+#[test]
 fn entrypoint_no_tiene_crlf() {
     let bytes = std::fs::read("docker-entrypoint.sh").expect("docker-entrypoint.sh");
     assert!(

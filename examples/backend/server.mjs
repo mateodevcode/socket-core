@@ -31,6 +31,8 @@ const PORT = Number(process.env.PORT || 8080);
 
 const app = express();
 app.use(express.json());
+// La raíz es el chat (no hay index.html): "/" -> /chat.html.
+app.get("/", (_req, res) => res.redirect(302, "/chat.html"));
 // Solo el fichero del SDK (no todo el directorio sdk/js).
 app.get("/sdk/socket-core.mjs", (_req, res) => {
   res.sendFile(join(__dirname, "..", "..", "sdk", "js", "socket-core.mjs"));

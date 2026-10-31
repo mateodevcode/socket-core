@@ -14,6 +14,10 @@ export function createPresenceTracker() {
         if (c && c.user && c.connection_id) setDe(c.user).add(c.connection_id);
       }
     },
+    /** Olvida todo: tras un reinicio del hub los connection_id viejos ya no valen. */
+    reset() {
+      porUsuario.clear();
+    },
     /** Aplica client_joined/client_left y devuelve el estado del usuario. */
     apply(ev) {
       if (!ev || !ev.user) return { user: null, online: false, connections: 0 };

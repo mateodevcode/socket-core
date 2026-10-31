@@ -382,6 +382,11 @@ El SDK abre `ws(s)://.../ws?token=<JWT>` y envía como primer mensaje
 `client_joined`/`client_left` (solo `user`, `connection_id`, `total_clients`).
 La lista completa se consulta con `GET /channels/:id/clients` (con `X-Api-Key`).
 
+> **El nombre que muestra el chat de ejemplo no es identidad.** `chat.html` envía
+> `from` dentro del payload y lo elige el cliente; solo sirve para pintar el
+> mensaje. La identidad verificada es el `sub` del JWT (el servidor la impone en
+> `source`). No uses `payload.from` para permisos ni para saber quién habla.
+
 ### 5.3 Publicar
 
 Por WS con el SDK: `await sc.publish({type:"chat",text:"hola"},{targets:["user-1"]})`.
@@ -422,6 +427,19 @@ curl -X POST https://hub.ejemplo.com/channels/tuproyecto:chat/events \
   `MASTER_KEY` solo cambia el acceso admin. Reinicia tras cambiarlos.
 - **Logs:** `docker compose logs -f socket-core` (`RUST_LOG=info`); los eventos de
   auditoría llevan `target=audit` y nunca contienen secretos.
+- **Pruebas de auth desde tu propia IP (fail2ban):** cada `401/403` del log de
+  Nginx cuenta para el jail `socketcore-auth` (30 en 5 min ⇒ baneo 1 h). Si pruebas
+  API keys falsas desde tu IP y el servidor usa `banaction = ufw`, el baneo corta
+  **todos los puertos** (también SSH), no solo 80/443. Para liberarte:
+
+  ```bash
+  sudo fail2ban-client status socketcore-auth          # ver IPs baneadas
+  sudo fail2ban-client set socketcore-auth unbanip TU_IP
+  sudo ufw status numbered                             # si queda un deny, bórralo
+  # sudo ufw delete <número>
+  ```
+
+  Usa otra IP o añade la tuya a `ignoreip` mientras desarrollas.
 - **TLS/red:** Nginx delante (proxy al puerto loopback); el admin no se publica y el
   contenedor corre como UID 10001 con FS de solo lectura (ver `docs/DESPLIEGUE.md`).
 
