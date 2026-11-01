@@ -465,5 +465,5 @@ src/
 ```
 
 Tests: `cargo test` (integración con hub temporal, aislamiento, revocación,
-límites y contrato de códigos). SDK: `node --test --test-force-exit sdk/js/test/sdk.test.mjs`.
+límites y contrato de códigos). SDK: `npm ci --prefix examples/backend && node --test --test-force-exit sdk/js/test/sdk.test.mjs`.
 Docs ejecutables: `python3 scripts/test_docs_curl.py`.

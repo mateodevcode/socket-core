@@ -75,6 +75,8 @@ jobs:
         uses: actions/setup-node@0a44ba7841725637a19e28fa30b79a866c81b0a6 # v4.0.4
         with:
           node-version: "24"
+      - name: Dependencias del backend de ejemplo
+        run: npm ci --prefix examples/backend --omit=dev --no-audit --no-fund
       - name: Compilar hub para tests
         run: cargo build --locked
       - name: Tests del SDK

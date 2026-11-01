@@ -89,6 +89,7 @@ Contra el hub real (se compila el binario y se levantan servidores temporales):
 
 ```bash
 cargo build
+npm ci --prefix examples/backend   # el flujo real levanta el backend de ejemplo
 node --test --test-force-exit sdk/js/test/sdk.test.mjs
 ```
 

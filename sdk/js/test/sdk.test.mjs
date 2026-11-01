@@ -1,5 +1,8 @@
 // Tests del SDK contra el hub REAL (target/debug/socket-core).
-// Ejecutar:  cargo build && node --test sdk/js/test/sdk.test.mjs
+// Ejecutar:
+//   cargo build
+//   npm ci --prefix examples/backend   # el flujo real levanta el backend de ejemplo
+//   node --test sdk/js/test/sdk.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -198,7 +201,9 @@ async function startExample(hub) {
   const ok = await waitServer(`${base}/`);
   if (!ok) {
     child.kill();
-    throw new Error(`el backend del ejemplo no arrancó. stderr: ${stderr.slice(-800)}`);
+    throw new Error(
+      `el backend del ejemplo no arrancó (¿npm ci --prefix examples/backend?). stderr: ${stderr.slice(-800)}`,
+    );
   }
   return { base, child, stderr: () => stderr };
 }
