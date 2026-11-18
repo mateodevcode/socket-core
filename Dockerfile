@@ -1,7 +1,7 @@
 # ============================================
 # socket-core — imagen multi-stage, no root
 # ============================================
-FROM rust:1.97-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 AS builder
+FROM rust:1.100-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea AS builder
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config libsqlite3-dev \
